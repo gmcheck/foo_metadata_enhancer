@@ -75,7 +75,7 @@ void SettingsManager::do_ensure_initialized() {
         m_config_path = m_config_path.substr(7);
     }
     
-    m_config_path += "\\foo_ai_metadata";
+    m_config_path += "\\foo_metadata_enhancer";
     CreateDirectoryA(m_config_path.c_str(), NULL);
     m_config_path += "\\settings.json";
     
@@ -138,7 +138,7 @@ static std::string trim_string(const std::string& s) {
 
 static std::string get_dll_directory() {
     char dll_path[MAX_PATH] = {0};
-    HMODULE hModule = GetModuleHandleA("foo_ai_metadata.dll");
+    HMODULE hModule = GetModuleHandleA("foo_metadata_enhancer.dll");
     if (hModule) {
         GetModuleFileNameA(hModule, dll_path, MAX_PATH);
         std::string dll_dir(dll_path);
@@ -160,12 +160,12 @@ void SettingsManager::load_from_config_yaml() {
     std::string dll_dir = get_dll_directory();
     log_format("[AI Metadata] load_from_config_yaml: DLL dir = ", dll_dir.c_str());
     
-    yaml_path = dll_dir + "\\foo_ai_metadata\\worker\\config.yaml";
+    yaml_path = dll_dir + "\\foo_metadata_enhancer\\worker\\config.yaml";
     log_format("[AI Metadata] load_from_config_yaml: Trying path 1 = ", yaml_path.c_str());
     file.open(yaml_path);
     
     if (!file.is_open()) {
-        yaml_path = dll_dir + "\\..\\foo_ai_metadata\\worker\\config.yaml";
+        yaml_path = dll_dir + "\\..\\foo_metadata_enhancer\\worker\\config.yaml";
         log_format("[AI Metadata] load_from_config_yaml: Trying path 2 = ", yaml_path.c_str());
         file.open(yaml_path);
     }
@@ -1625,7 +1625,7 @@ void AIPreferencePageInstance::on_test_api() {
 
 void AIPreferencePageInstance::on_open_log_folder() {
     std::string log_path = core_api::get_profile_path();
-    log_path += "\\foo_ai_metadata\\logs";
+    log_path += "\\foo_metadata_enhancer\\logs";
     
     CreateDirectoryA(log_path.c_str(), NULL);
     
@@ -1646,7 +1646,7 @@ void AIPreferencePageInstance::on_clear_cache() {
     
     if (result == IDYES) {
         std::string cache_path = core_api::get_profile_path();
-        cache_path += "\\foo_ai_metadata\\cache\\ai_metadata_cache.db";
+        cache_path += "\\foo_metadata_enhancer\\cache\\ai_metadata_cache.db";
         
         if (DeleteFileA(cache_path.c_str())) {
             SetDlgItemTextA(m_wnd, IDC_STATUS_TEXT, "Cache cleared successfully");

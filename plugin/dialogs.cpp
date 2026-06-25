@@ -127,9 +127,9 @@ INT_PTR CALLBACK ErrorDialog::DlgProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) 
                 case IDC_VIEW_LOG_BTN:
                     {
                         std::string profile_path = core_api::get_profile_path();
-                        std::string log_path = profile_path + "\\foo_ai_metadata\\logs";
+                        std::string log_path = profile_path + "\\foo_metadata_enhancer\\logs";
                         
-                        CreateDirectoryA((profile_path + "\\foo_ai_metadata").c_str(), NULL);
+                        CreateDirectoryA((profile_path + "\\foo_metadata_enhancer").c_str(), NULL);
                         CreateDirectoryA(log_path.c_str(), NULL);
                         
                         std::string log_file = log_path + "\\core.log";

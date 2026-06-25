@@ -114,14 +114,14 @@ std::string Logger::get_log_file_path() {
     
 #ifdef _WIN32
     char dll_path[MAX_PATH] = {0};
-    HMODULE hModule = GetModuleHandleA("foo_ai_metadata.dll");
+    HMODULE hModule = GetModuleHandleA("foo_metadata_enhancer.dll");
     if (hModule) {
         GetModuleFileNameA(hModule, dll_path, MAX_PATH);
         std::string dll_dir(dll_path);
         size_t pos = dll_dir.find_last_of("\\/");
         if (pos != std::string::npos) {
-            std::string logs_dir = dll_dir.substr(0, pos) + "\\foo_ai_metadata\\logs";
-            CreateDirectoryA((dll_dir.substr(0, pos) + "\\foo_ai_metadata").c_str(), NULL);
+            std::string logs_dir = dll_dir.substr(0, pos) + "\\foo_metadata_enhancer\\logs";
+            CreateDirectoryA((dll_dir.substr(0, pos) + "\\foo_metadata_enhancer").c_str(), NULL);
             CreateDirectoryA(logs_dir.c_str(), NULL);
             log_path = logs_dir + "\\core.log";
         }

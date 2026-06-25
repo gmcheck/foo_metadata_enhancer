@@ -21,15 +21,15 @@ logger = logging.getLogger(__name__)
 
 
 def _find_foobar_profile() -> Optional[Path]:
-    """查找 foo_ai_metadata 目录（包含 settings.json）
+    """查找 foo_metadata_enhancer 目录（包含 settings.json）
     
     搜索顺序：
-    1. 从当前脚本目录向上查找 settings.json 或 foo_ai_metadata/settings.json
+    1. 从当前脚本目录向上查找 settings.json 或 foo_metadata_enhancer/settings.json
     2. 从 components 目录查找（foobar2000 便携版 profile 子目录）
     3. 从标准 foobar2000 profile 路径查找
     
     Returns:
-        Optional[Path]: foo_ai_metadata 目录路径，未找到返回 None
+        Optional[Path]: foo_metadata_enhancer 目录路径，未找到返回 None
     """
     script_dir = Path(__file__).parent.resolve()
     
@@ -44,15 +44,15 @@ def _find_foobar_profile() -> Optional[Path]:
         if parent == current:
             break
         
-        # 检查父目录下是否有 foo_ai_metadata/settings.json
-        foo_ai_metadata_dir = parent / "foo_ai_metadata"
-        if foo_ai_metadata_dir.exists():
-            settings_file = foo_ai_metadata_dir / "settings.json"
+        # 检查父目录下是否有 foo_metadata_enhancer/settings.json
+        foo_metadata_enhancer_dir = parent / "foo_metadata_enhancer"
+        if foo_metadata_enhancer_dir.exists():
+            settings_file = foo_metadata_enhancer_dir / "settings.json"
             if settings_file.exists():
-                return foo_ai_metadata_dir
+                return foo_metadata_enhancer_dir
         
-        # 检查父目录下是否有 profile/foo_ai_metadata/settings.json（便携版）
-        profile_dir = parent / "profile" / "foo_ai_metadata"
+        # 检查父目录下是否有 profile/foo_metadata_enhancer/settings.json（便携版）
+        profile_dir = parent / "profile" / "foo_metadata_enhancer"
         if profile_dir.exists():
             settings_file = profile_dir / "settings.json"
             if settings_file.exists():
@@ -61,15 +61,15 @@ def _find_foobar_profile() -> Optional[Path]:
         current = parent
     
     # 从脚本目录向上查找 components 目录
-    # 脚本路径: .../components/foo_ai_metadata/worker/common/config_manager.py
+    # 脚本路径: .../components/foo_metadata_enhancer/worker/common/config_manager.py
     dll_candidates = []
     current = script_dir
     for _ in range(10):
         if current.name == "components":
             # 便携版: components 的父目录是 foobar2000 安装目录
             fb2k_root = current.parent
-            dll_candidates.append(fb2k_root / "profile" / "foo_ai_metadata")
-            dll_candidates.append(fb2k_root / "foo_ai_metadata")
+            dll_candidates.append(fb2k_root / "profile" / "foo_metadata_enhancer")
+            dll_candidates.append(fb2k_root / "foo_metadata_enhancer")
             break
         parent = current.parent
         if parent == current:
@@ -103,7 +103,7 @@ def _find_foobar_profile() -> Optional[Path]:
     candidates.append(Path(program_files_x86) / "foobar2000_v2" / "profile")
     
     for candidate in candidates:
-        settings_dir = candidate / "foo_ai_metadata"
+        settings_dir = candidate / "foo_metadata_enhancer"
         settings_file = settings_dir / "settings.json"
         if settings_file.exists():
             return settings_dir
@@ -120,15 +120,15 @@ def _get_expected_settings_path() -> Optional[Path]:
     script_dir = Path(__file__).parent.resolve()
     
     # 从脚本目录向上查找 components 目录
-    # 脚本路径: .../components/foo_ai_metadata/worker/common/config_manager.py
+    # 脚本路径: .../components/foo_metadata_enhancer/worker/common/config_manager.py
     current = script_dir
     for _ in range(10):
         if current.name == "components":
             fb2k_root = current.parent
             profile_dir = fb2k_root / "profile"
             if profile_dir.exists():
-                return profile_dir / "foo_ai_metadata" / "settings.json"
-            return fb2k_root / "foo_ai_metadata" / "settings.json"
+                return profile_dir / "foo_metadata_enhancer" / "settings.json"
+            return fb2k_root / "foo_metadata_enhancer" / "settings.json"
         parent = current.parent
         if parent == current:
             break

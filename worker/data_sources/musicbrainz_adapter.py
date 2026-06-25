@@ -110,8 +110,8 @@ class MusicBrainzAdapter(DataSourceAdapter):
         mb_config = data_sources_config.get("musicbrainz", {})
         
         self._api_url = mb_config.get("api_url", self.BASE_URL)
-        self._user_agent = f"{mb_config.get('user_agent_name', 'foo_ai_metadata')}/{mb_config.get('user_agent_version', '1.0')}"
-        self._user_agent_contact = mb_config.get("user_agent_contact", "https://github.com/user/foo_ai_metadata")
+        self._user_agent = f"{mb_config.get('user_agent_name', 'foo_metadata_enhancer')}/{mb_config.get('user_agent_version', '1.0')}"
+        self._user_agent_contact = mb_config.get("user_agent_contact", "https://github.com/user/foo_metadata_enhancer")
         self._rate_limit_rpm = mb_config.get("rate_limit_rpm", 50)
         self._enabled = mb_config.get("enabled", True)
         self._timeout = mb_config.get("timeout", 30)

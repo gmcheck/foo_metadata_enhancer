@@ -1,7 +1,7 @@
 # =============================================================================
 # foobar2000 AI Metadata Plugin - CMake Build Configuration
 # =============================================================================
-# 插件名称: foo_ai_metadata
+# 插件名称: foo_metadata_enhancer
 # 功能: AI驱动的音乐元数据分析插件
 #   - 流派分类 (Genre Classification)
 #   - 版本识别 (Edition Identification)
@@ -20,7 +20,7 @@ cmake_minimum_required(VERSION 3.25)
 set(VCPKG_PATH "D:/Programs/vcpkg" CACHE PATH "vcpkg installation path")
 set(CMAKE_TOOLCHAIN_FILE "${VCPKG_PATH}/scripts/buildsystems/vcpkg.cmake" CACHE STRING "")
 
-project(foo_ai_metadata VERSION 1.0.0 LANGUAGES C CXX)
+project(foo_metadata_enhancer VERSION 1.0.0 LANGUAGES C CXX)
 
 # C++20 标准
 set(CMAKE_CXX_STANDARD 20)
@@ -105,13 +105,13 @@ file(GLOB HELPER_SOURCES "${FOOBAR2000_SDK_PATH}/foobar2000/helpers/*.cpp")
 file(GLOB LIBPPUI_SOURCES "${FOOBAR2000_SDK_PATH}/libPPUI/*.cpp")
 
 # =============================================================================
-# 插件主库 (foo_ai_metadata) - 动态库
+# 插件主库 (foo_metadata_enhancer) - 动态库
 # =============================================================================
 # 包含:
 #   - main.cpp        : 插件入口点
 #   - menu_handler.cpp: 右键菜单处理
 #   - tag_writer.cpp  : 元数据写入
-#   - foo_ai_metadata.rc: 版本资源
+#   - foo_metadata_enhancer.rc: 版本资源
 # =============================================================================
 
 set(PLUGIN_SOURCES
@@ -121,7 +121,7 @@ set(PLUGIN_SOURCES
     plugin/dialogs.cpp
     plugin/confirm_dialog.cpp
     plugin/backup_manager.cpp
-    ${PROJECT_SOURCE_DIR}/foo_ai_metadata.rc
+    ${PROJECT_SOURCE_DIR}/foo_metadata_enhancer.rc
     ${PFC_SOURCES}
     ${SDK_SOURCES}
     ${CLIENT_SOURCES}
@@ -129,9 +129,9 @@ set(PLUGIN_SOURCES
     ${LIBPPUI_SOURCES}
 )
 
-add_library(foo_ai_metadata SHARED ${PLUGIN_SOURCES})
+add_library(foo_metadata_enhancer SHARED ${PLUGIN_SOURCES})
 
-target_include_directories(foo_ai_metadata PRIVATE
+target_include_directories(foo_metadata_enhancer PRIVATE
     ${PROJECT_SOURCE_DIR}
     ${PROJECT_SOURCE_DIR}/include
     ${PROJECT_SOURCE_DIR}/include/third_party
@@ -144,7 +144,7 @@ target_include_directories(foo_ai_metadata PRIVATE
     ${FOOBAR2000_SDK_PATH}/libPPUI
 )
 
-target_compile_definitions(foo_ai_metadata PRIVATE
+target_compile_definitions(foo_metadata_enhancer PRIVATE
     _UNICODE
     UNICODE
     WIN32
@@ -158,7 +158,7 @@ target_compile_definitions(foo_ai_metadata PRIVATE
 # =============================================================================
 # 链接库
 # =============================================================================
-target_link_libraries(foo_ai_metadata
+target_link_libraries(foo_metadata_enhancer
     PRIVATE
     ai_core
     "${FOOBAR2000_SDK_PATH}/foobar2000/shared/shared-x64.lib"
@@ -185,14 +185,14 @@ target_link_libraries(foo_ai_metadata
 set(FOOBAR_DEV_DIR "" CACHE PATH "Local foobar2000 dev directory (empty to skip auto-deploy)")
 
 if(FOOBAR_DEV_DIR)
-    set(PLUGIN_DIR "${FOOBAR_DEV_DIR}/components/foo_ai_metadata")
+    set(PLUGIN_DIR "${FOOBAR_DEV_DIR}/components/foo_metadata_enhancer")
 
     # 部署DLL到foobar2000 components目录
-    add_custom_command(TARGET foo_ai_metadata POST_BUILD
+    add_custom_command(TARGET foo_metadata_enhancer POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E make_directory "${FOOBAR_DEV_DIR}/components"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            $<TARGET_FILE:foo_ai_metadata>
-            "${FOOBAR_DEV_DIR}/components/$<TARGET_FILE_NAME:foo_ai_metadata>"
+            $<TARGET_FILE:foo_metadata_enhancer>
+            "${FOOBAR_DEV_DIR}/components/$<TARGET_FILE_NAME:foo_metadata_enhancer>"
         COMMENT "Deploying plugin DLL to foobar2000 dev environment"
     )
 
@@ -203,7 +203,7 @@ if(FOOBAR_DEV_DIR)
     file(MAKE_DIRECTORY "${PLUGIN_DIR}/worker")
 
     # 部署Python Worker脚本
-    add_custom_command(TARGET foo_ai_metadata POST_BUILD
+    add_custom_command(TARGET foo_metadata_enhancer POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_directory
             "${PROJECT_SOURCE_DIR}/worker"
             "${PLUGIN_DIR}/worker"

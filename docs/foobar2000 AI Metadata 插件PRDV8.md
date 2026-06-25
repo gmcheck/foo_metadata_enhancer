@@ -76,7 +76,7 @@ AI 使用 **OpenRouter API** 或本地模型（如 Ollama），也支持智谱AI
 ```text
 Foobar2000 主进程 (UI & Tagging Thread)
      │
-foo_ai_metadata.dll (C++ Plugin) ───[ metadb_io_v3 API 交互 ]
+foo_metadata_enhancer.dll (C++ Plugin) ───[ metadb_io_v3 API 交互 ]
      │
 AI Core (C++) ──[ contextmenu_item_v2 触发 ]
      │
@@ -290,7 +290,7 @@ cmake --build out/build --config Release -- /m
 
 *构建配置说明：*
 - *C++ 标准：C++20*
-- *项目名称：foo_ai_metadata*
+- *项目名称：foo_metadata_enhancer*
 - *注意：C++ 工程必须配置 `.rc` 资源文件，包含 `FileVersion`, `FileDescription` 等元数据，否则 foobar2000 将拒绝加载组件。*
 
 ### 4.2 配置文件管理
@@ -331,14 +331,14 @@ copy worker\config.yaml.template worker\config.yaml
 | 2. 检查文件 | 验证 DLL 和 worker 目录存在 |
 | 3. 准备文件 | 复制 DLL、worker 脚本，排除 `__pycache__` 和 `.pyc` |
 | 4. 替换配置 | 删除 `config.yaml`，用 `config.yaml.template` 替代 |
-| 5. 创建 zip | 输出到 `zips/foo_ai_metadata-<version>.zip` |
+| 5. 创建 zip | 输出到 `zips/foo_metadata_enhancer-<version>.zip` |
 
 ### 4.4 发布包结构
 
 ```
-foo_ai_metadata-1.0.0.zip
-├── foo_ai_metadata.dll              # C++插件
-└── foo_ai_metadata/                 # 插件数据目录
+foo_metadata_enhancer-1.0.0.zip
+├── foo_metadata_enhancer.dll              # C++插件
+└── foo_metadata_enhancer/                 # 插件数据目录
     ├── worker/                      # Python Worker脚本
     │   ├── ai_worker.py
     │   ├── config.yaml              # 从 template 复制，API key 为空
@@ -354,20 +354,20 @@ foo_ai_metadata-1.0.0.zip
 
 ### 4.5 安装部署
 
-1. 解压 `foo_ai_metadata-x.x.x.zip`
-2. 将 `foo_ai_metadata.dll` 和 `foo_ai_metadata` 文件夹复制到 foobar2000 的 `components/` 目录
-3. 编辑 `components/foo_ai_metadata/worker/config.yaml`，填入 API key
+1. 解压 `foo_metadata_enhancer-x.x.x.zip`
+2. 将 `foo_metadata_enhancer.dll` 和 `foo_metadata_enhancer` 文件夹复制到 foobar2000 的 `components/` 目录
+3. 编辑 `components/foo_metadata_enhancer/worker/config.yaml`，填入 API key
 4. 启动 foobar2000
 
 ### 4.6 升级策略
 
 | 文件/目录 | 操作 | 说明 |
 | --- | --- | --- |
-| `foo_ai_metadata.dll` | 覆盖 | 插件主体 |
-| `foo_ai_metadata/worker/` | 覆盖 | Python Worker脚本 |
-| `foo_ai_metadata/worker/config.yaml` | 保留 | 用户配置，不覆盖 |
-| `foo_ai_metadata/cache/` | 保留 | 缓存数据 |
-| `foo_ai_metadata/logs/` | 保留 | 历史日志 |
+| `foo_metadata_enhancer.dll` | 覆盖 | 插件主体 |
+| `foo_metadata_enhancer/worker/` | 覆盖 | Python Worker脚本 |
+| `foo_metadata_enhancer/worker/config.yaml` | 保留 | 用户配置，不覆盖 |
+| `foo_metadata_enhancer/cache/` | 保留 | 缓存数据 |
+| `foo_metadata_enhancer/logs/` | 保留 | 历史日志 |
 
 ### 4.7 运行环境依赖
 
@@ -383,7 +383,7 @@ foo_ai_metadata-1.0.0.zip
 ## 5. 目录结构
 
 ```text
-foo_ai_metadata_v8/
+foo_metadata_enhancer_v8/
 
 plugin/                      # foobar2000 插件 (SHARED)
    main.cpp                  # 组件入口与描述
@@ -392,7 +392,7 @@ plugin/                      # foobar2000 插件 (SHARED)
    confirm_dialog.cpp        # V8新增：确认对话框实现
    preferences_page.cpp      # 设置面板实现
    backup_manager.cpp        # V8新增：备份管理器
-   foo_ai_metadata.rc        # 版本资源文件
+   foo_metadata_enhancer.rc        # 版本资源文件
    resource.h                # 资源ID定义
 
 core/                        # 核心库 (STATIC)

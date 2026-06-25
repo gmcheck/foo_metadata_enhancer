@@ -151,9 +151,9 @@ data_sources:
     # API base URL (recording endpoint)
     api_url: "https://musicbrainz.org/ws/2/recording"
     # User-Agent (MusicBrainz requires format: name/version (contact))
-    user_agent_name: "foo_ai_metadata"
+    user_agent_name: "foo_metadata_enhancer"
     user_agent_version: "1.0"
-    user_agent_contact: "https://github.com/yourusername/foo_ai_metadata"
+    user_agent_contact: "https://github.com/yourusername/foo_metadata_enhancer"
     # Rate limit (requests per minute, MusicBrainz limits to 1/sec)
     rate_limit_rpm: 50
     # HTTP request timeout (seconds)

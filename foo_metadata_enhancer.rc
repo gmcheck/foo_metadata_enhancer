@@ -10,9 +10,9 @@
 
 #define VER_COMPANYNAME_STR         "AI Metadata"
 #define VER_FILEDESCRIPTION_STR     "AI Metadata Analysis Plugin for foobar2000"
-#define VER_INTERNALNAME_STR        "foo_ai_metadata"
+#define VER_INTERNALNAME_STR        "foo_metadata_enhancer"
 #define VER_LEGALCOPYRIGHT_STR      "Copyright (C) 2024"
-#define VER_ORIGINALFILENAME_STR    "foo_ai_metadata.dll"
+#define VER_ORIGINALFILENAME_STR    "foo_metadata_enhancer.dll"
 #define VER_PRODUCTNAME_STR         "AI Metadata Analysis"
 
 VS_VERSION_INFO VERSIONINFO

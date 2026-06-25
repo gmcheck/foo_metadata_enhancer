@@ -1,4 +1,4 @@
-# foo_ai_metadata 用户指南
+# foo_metadata_enhancer 用户指南
 
 本文档详细介绍 foobar2000 AI Metadata 插件的安装、配置和使用方法。
 
@@ -24,9 +24,9 @@
 
 ## 1. 简介
 
-### 1.1 什么是 foo_ai_metadata？
+### 1.1 什么是 foo_metadata_enhancer？
 
-foo_ai_metadata 是一个 foobar2000 插件，利用人工智能技术自动分析和完善音乐文件的元数据。
+foo_metadata_enhancer 是一个 foobar2000 插件，利用人工智能技术自动分析和完善音乐文件的元数据。
 
 ### 1.2 核心功能
 
@@ -116,14 +116,14 @@ python --version
 
 ### 3.1 下载插件
 
-1. 访问 [GitHub Releases](https://github.com/yourusername/foo_ai_metadata/releases) 页面
-2. 下载最新版本的 `foo_ai_metadata-x.x.x.zip`
+1. 访问 [GitHub Releases](https://github.com/yourusername/foo_metadata_enhancer/releases) 页面
+2. 下载最新版本的 `foo_metadata_enhancer-x.x.x.zip`
 3. 解压缩下载的文件
 
 ### 3.2 安装组件
 
 1. 关闭 foobar2000
-2. 将 `foo_ai_metadata.dll` 和 `foo_ai_metadata` 文件夹复制到 foobar2000 的 `components` 文件夹
+2. 将 `foo_metadata_enhancer.dll` 和 `foo_metadata_enhancer` 文件夹复制到 foobar2000 的 `components` 文件夹
    - 默认路径：`C:\Program Files\foobar2000\components\`
    - 或便携版路径：`foobar2000\components\`
 3. 启动 foobar2000
@@ -476,7 +476,7 @@ This will restore the original metadata before any AI processing.
 **缓存说明**：
 
 - 缓存存储在 SQLite 数据库中
-- 位置：`%APPDATA%\foobar2000-v2\foo_ai_metadata\cache.db`
+- 位置：`%APPDATA%\foobar2000-v2\foo_metadata_enhancer\cache.db`
 - 启用缓存可大幅减少 API 调用，节省费用
 
 #### 6.1.4 Logging 区域
@@ -726,7 +726,7 @@ track_id = SHA256(path + "|" + subsong + "|" + file_size)
 ### 9.3 缓存位置
 
 ```
-%APPDATA%\foobar2000-v2\foo_ai_metadata\cache.db
+%APPDATA%\foobar2000-v2\foo_metadata_enhancer\cache.db
 ```
 
 ### 9.4 缓存统计
@@ -747,7 +747,7 @@ track_id = SHA256(path + "|" + subsong + "|" + file_size)
 在执行 Stage 1 或 Stage 2 之前，插件会自动备份当前标签：
 
 ```
-备份位置：%APPDATA%\foobar2000-v2\foo_ai_metadata\backup.db
+备份位置：%APPDATA%\foobar2000-v2\foo_metadata_enhancer\backup.db
 ```
 
 ### 10.2 备份内容
@@ -777,7 +777,7 @@ track_id = SHA256(path + "|" + subsong + "|" + file_size)
 ### 11.1 日志位置
 
 ```
-%APPDATA%\foobar2000-v2\foo_ai_metadata\logs\ai_metadata.log
+%APPDATA%\foobar2000-v2\foo_metadata_enhancer\logs\ai_metadata.log
 ```
 
 ### 11.2 日志级别
@@ -807,7 +807,7 @@ track_id = SHA256(path + "|" + subsong + "|" + file_size)
 - foobar2000 版本过低
 
 **解决方案**：
-1. 确认 `foo_ai_metadata.dll` 在 `components` 文件夹
+1. 确认 `foo_metadata_enhancer.dll` 在 `components` 文件夹
 2. 检查 Help → About 中是否显示插件
 3. 升级 foobar2000 到 2.0 或更高版本
 
@@ -910,8 +910,8 @@ cmake --build out/build --config Release -- /m
 编译完成后，DLL 和 worker 脚本会自动复制到：
 ```
 <FOOBAR_DEV_DIR>/components/
-├── foo_ai_metadata.dll
-└── foo_ai_metadata/
+├── foo_metadata_enhancer.dll
+└── foo_metadata_enhancer/
     ├── cache/
     ├── logs/
     └── worker/
@@ -947,14 +947,14 @@ cmake --build out/build --config Release -- /m
 | 2. 检查文件 | 验证 DLL 和 worker 目录存在 |
 | 3. 准备文件 | 复制 DLL、worker 脚本，排除 `__pycache__` 和 `.pyc` |
 | 4. 替换配置 | 删除 `config.yaml`，用 `config.yaml.template` 替代 |
-| 5. 创建 zip | 输出到 `zips/foo_ai_metadata-<version>.zip` |
+| 5. 创建 zip | 输出到 `zips/foo_metadata_enhancer-<version>.zip` |
 
 **生成的 zip 结构**：
 
 ```
-foo_ai_metadata-1.0.0.zip
-├── foo_ai_metadata.dll
-└── foo_ai_metadata/
+foo_metadata_enhancer-1.0.0.zip
+├── foo_metadata_enhancer.dll
+└── foo_metadata_enhancer/
     ├── cache/              (空目录)
     ├── logs/               (空目录)
     └── worker/             (Python 脚本)
@@ -983,9 +983,9 @@ cmake -B out/build ^
 
 ### 13.6 安装发布包
 
-1. 解压 `foo_ai_metadata-x.x.x.zip`
-2. 将 `foo_ai_metadata.dll` 和 `foo_ai_metadata` 文件夹复制到 foobar2000 的 `components/` 目录
-3. 编辑 `components/foo_ai_metadata/worker/config.yaml`，填入你的 API key
+1. 解压 `foo_metadata_enhancer-x.x.x.zip`
+2. 将 `foo_metadata_enhancer.dll` 和 `foo_metadata_enhancer` 文件夹复制到 foobar2000 的 `components/` 目录
+3. 编辑 `components/foo_metadata_enhancer/worker/config.yaml`，填入你的 API key
 4. 重启 foobar2000
 
 ---
@@ -1008,10 +1008,10 @@ cmake -B out/build ^
 
 | 文件 | 位置 |
 |------|------|
-| 配置文件 | `%APPDATA%\foobar2000-v2\foo_ai_metadata\settings.json` |
-| 缓存数据库 | `%APPDATA%\foobar2000-v2\foo_ai_metadata\cache.db` |
-| 备份数据库 | `%APPDATA%\foobar2000-v2\foo_ai_metadata\backup.db` |
-| 日志文件 | `%APPDATA%\foobar2000-v2\foo_ai_metadata\logs\` |
+| 配置文件 | `%APPDATA%\foobar2000-v2\foo_metadata_enhancer\settings.json` |
+| 缓存数据库 | `%APPDATA%\foobar2000-v2\foo_metadata_enhancer\cache.db` |
+| 备份数据库 | `%APPDATA%\foobar2000-v2\foo_metadata_enhancer\backup.db` |
+| 日志文件 | `%APPDATA%\foobar2000-v2\foo_metadata_enhancer\logs\` |
 
 ### C. 性能优化建议
 
@@ -1038,5 +1038,5 @@ cmake -B out/build ^
 
 ## 联系支持
 
-- **GitHub Issues**: [https://github.com/yourusername/foo_ai_metadata/issues](https://github.com/yourusername/foo_ai_metadata/issues)
+- **GitHub Issues**: [https://github.com/yourusername/foo_metadata_enhancer/issues](https://github.com/yourusername/foo_metadata_enhancer/issues)
 - **文档**: [docs/](docs/)

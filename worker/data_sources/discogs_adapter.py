@@ -145,7 +145,7 @@ class DiscogsAdapter(DataSourceAdapter):
             url = f"{url}?{query_string}"
         
         headers = {
-            "User-Agent": "foo_ai_metadata/1.0",
+            "User-Agent": "foo_metadata_enhancer/1.0",
             "Accept": "application/vnd.discogs.v2.discogs+json",
         }
         

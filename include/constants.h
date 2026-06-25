@@ -113,7 +113,7 @@ inline const char* error_parse_error() { return "PARSE_ERROR"; }
  * @brief 获取插件名称
  * @return 插件名称字符串
  */
-inline const char* plugin_name() { return "foo_ai_metadata"; }
+inline const char* plugin_name() { return "foo_metadata_enhancer"; }
 
 /**
  * @brief 获取插件版本

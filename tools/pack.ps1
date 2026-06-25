@@ -1,10 +1,10 @@
 <#
 .SYNOPSIS
-    foo_ai_metadata plugin packaging script
+    foo_metadata_enhancer plugin packaging script
 
 .DESCRIPTION
     Collects plugin files from build output and source, packages into a zip.
-    Version is read from foo_ai_metadata.rc file.
+    Version is read from foo_metadata_enhancer.rc file.
 
 .EXAMPLE
     .\pack.ps1
@@ -25,7 +25,7 @@ $ErrorActionPreference = "Stop"
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
 $BuildDir = Join-Path $ProjectRoot "out\build\Release"
 $WorkerSourceDir = Join-Path $ProjectRoot "worker"
-$RcFile = Join-Path $ProjectRoot "foo_ai_metadata.rc"
+$RcFile = Join-Path $ProjectRoot "foo_metadata_enhancer.rc"
 $ZipsDir = Join-Path $ProjectRoot "zips"
 
 # =============================================================================
@@ -39,13 +39,13 @@ if ([string]::IsNullOrEmpty($Version)) {
         }
     }
     if ([string]::IsNullOrEmpty($Version)) {
-        Write-Error "Cannot read version from foo_ai_metadata.rc. Use -Version parameter."
+        Write-Error "Cannot read version from foo_metadata_enhancer.rc. Use -Version parameter."
         exit 1
     }
 }
 
 Write-Host "==========================================" -ForegroundColor Cyan
-Write-Host "  foo_ai_metadata Packager" -ForegroundColor Cyan
+Write-Host "  foo_metadata_enhancer Packager" -ForegroundColor Cyan
 Write-Host "  Version: $Version" -ForegroundColor Cyan
 Write-Host "==========================================" -ForegroundColor Cyan
 Write-Host ""
@@ -75,7 +75,7 @@ if ($BuildFirst) {
 # =============================================================================
 Write-Host "[2/5] Checking files..." -ForegroundColor Yellow
 
-$DllPath = Join-Path $BuildDir "foo_ai_metadata.dll"
+$DllPath = Join-Path $BuildDir "foo_metadata_enhancer.dll"
 if (-not (Test-Path $DllPath)) {
     Write-Error "DLL not found: $DllPath`nBuild first or use -BuildFirst"
     exit 1
@@ -93,7 +93,7 @@ Write-Host "      Worker: $WorkerSourceDir" -ForegroundColor DarkGray
 # =============================================================================
 Write-Host "[3/5] Preparing files..." -ForegroundColor Yellow
 
-$TempDir = Join-Path $env:TEMP "foo_ai_metadata_pack_$Version"
+$TempDir = Join-Path $env:TEMP "foo_metadata_enhancer_pack_$Version"
 if (Test-Path $TempDir) {
     Remove-Item $TempDir -Recurse -Force
 }
@@ -102,8 +102,8 @@ New-Item -ItemType Directory -Path $TempDir -Force | Out-Null
 # Copy DLL
 Copy-Item $DllPath $TempDir
 
-# Create foo_ai_metadata folder structure
-$PluginDir = Join-Path $TempDir "foo_ai_metadata"
+# Create foo_metadata_enhancer folder structure
+$PluginDir = Join-Path $TempDir "foo_metadata_enhancer"
 New-Item -ItemType Directory -Path $PluginDir -Force | Out-Null
 New-Item -ItemType Directory -Path (Join-Path $PluginDir "cache") -Force | Out-Null
 New-Item -ItemType Directory -Path (Join-Path $PluginDir "logs") -Force | Out-Null
@@ -141,7 +141,7 @@ if (-not (Test-Path $ZipsDir)) {
     New-Item -ItemType Directory -Path $ZipsDir -Force | Out-Null
 }
 
-$ZipName = "foo_ai_metadata-$Version.zip"
+$ZipName = "foo_metadata_enhancer-$Version.zip"
 $ZipPath = Join-Path $ZipsDir $ZipName
 
 if (Test-Path $ZipPath) {
@@ -172,8 +172,8 @@ Write-Host "  Version: $Version" -ForegroundColor White
 Write-Host "  File:    $ZipPath" -ForegroundColor White
 Write-Host ""
 Write-Host "  Zip structure:" -ForegroundColor DarkGray
-Write-Host "    foo_ai_metadata.dll" -ForegroundColor DarkGray
-Write-Host "    foo_ai_metadata/" -ForegroundColor DarkGray
+Write-Host "    foo_metadata_enhancer.dll" -ForegroundColor DarkGray
+Write-Host "    foo_metadata_enhancer/" -ForegroundColor DarkGray
 Write-Host "      cache/   (empty)" -ForegroundColor DarkGray
 Write-Host "      logs/    (empty)" -ForegroundColor DarkGray
 Write-Host "      worker/  (Python scripts)" -ForegroundColor DarkGray

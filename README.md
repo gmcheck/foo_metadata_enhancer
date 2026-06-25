@@ -1,4 +1,4 @@
-# foo_ai_metadata
+# foo_metadata_enhancer
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![foobar2000](https://img.shields.io/badge/foobar2000-2.0%2B-green.svg)](https://www.foobar2000.org/)
@@ -29,9 +29,9 @@ A foobar2000 plugin that uses AI to automatically analyze, scrape, and enhance m
 
 ## Installation
 
-1. Download the latest release from [Releases](https://github.com/yourusername/foo_ai_metadata/releases)
+1. Download the latest release from [Releases](https://github.com/yourusername/foo_metadata_enhancer/releases)
 2. Extract the archive
-3. Copy `foo_ai_metadata.dll` and `foo_ai_metadata` folder to your foobar2000 `components` folder
+3. Copy `foo_metadata_enhancer.dll` and `foo_metadata_enhancer` folder to your foobar2000 `components` folder
 4. Restart foobar2000
 
 ## Quick Start
@@ -127,8 +127,8 @@ Access settings via: **File** → **Preferences** → **AI Metadata**
 #### 1. Clone and Configure
 
 ```bash
-git clone https://github.com/yourusername/foo_ai_metadata.git
-cd foo_ai_metadata
+git clone https://github.com/yourusername/foo_metadata_enhancer.git
+cd foo_metadata_enhancer
 ```
 
 Copy the config template and fill in your API keys:
@@ -142,11 +142,11 @@ copy worker\config.yaml.template worker\config.yaml
 
 ```bash
 # Configure (with auto-deploy to local foobar2000)
-Remove-Item -Recurse -Force out/build; cmake -B out/build -G "Visual Studio 17 2022" -A x64 ^
+Remove-Item -Recurse -Force out/build; cmake -B out/build -G "Visual Studio 18 2026" -A x64 ^
     -DFOOBAR_DEV_DIR="C:/path/to/your/foobar2000"
 
 # Or configure without auto-deploy (for packaging only)
-Remove-Item -Recurse -Force out/build; cmake -B out/build -G "Visual Studio 17 2022" -A x64
+Remove-Item -Recurse -Force out/build; cmake -B out/build -G "Visual Studio 18 2026" -A x64
 
 # Build
 cmake --build out/build --config Release -- /m
@@ -159,7 +159,7 @@ cmake --build out/build --config Release -- /m
 .\tools\pack.ps1
 
 # Specify version manually
-.\tools\pack.ps1 -Version 1.0.1
+.\tools\pack.ps1 -Version 1.0.0
 
 # Build and package in one step
 .\tools\pack.ps1 -BuildFirst
@@ -168,9 +168,9 @@ cmake --build out/build --config Release -- /m
 The zip file will be generated in `zips/` folder:
 
 ```
-zips/foo_ai_metadata-1.0.0.zip
-├── foo_ai_metadata.dll
-└── foo_ai_metadata/
+zips/foo_metadata_enhancer-1.0.0.zip
+├── foo_metadata_enhancer.dll
+└── foo_metadata_enhancer/
     ├── cache/        (empty)
     ├── logs/         (empty)
     └── worker/       (Python scripts + config.yaml from template)
@@ -183,8 +183,8 @@ Extract the zip to foobar2000's `components/` directory:
 ```
 foobar2000/
 └── components/
-    ├── foo_ai_metadata.dll
-    └── foo_ai_metadata/
+    ├── foo_metadata_enhancer.dll
+    └── foo_metadata_enhancer/
         ├── cache/
         ├── logs/
         └── worker/
@@ -197,7 +197,7 @@ foobar2000/
 ## Project Structure
 
 ```
-foo_ai_metadata/
+foo_metadata_enhancer/
 ├── core/                   # C++ core library
 │   ├── ai_core.cpp         # Main AI processing logic
 │   ├── cache_layer.cpp     # SQLite cache implementation
@@ -236,7 +236,7 @@ foo_ai_metadata/
 
 ### Plugin not appearing in menu
 
-1. Ensure `foo_ai_metadata.dll` is in the `components` folder
+1. Ensure `foo_metadata_enhancer.dll` is in the `components` folder
 2. Check Help → About to verify the plugin is loaded
 3. Restart foobar2000
 
@@ -244,7 +244,7 @@ foo_ai_metadata/
 
 1. Verify your API key is correct
 2. Check network connectivity
-3. Review logs in `%APPDATA%\foobar2000-v2\foo_ai_metadata\logs\`
+3. Review logs in `%APPDATA%\foobar2000-v2\foo_metadata_enhancer\logs\`
 
 ### Worker process crashes
 

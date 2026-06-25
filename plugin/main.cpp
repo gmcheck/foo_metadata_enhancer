@@ -1,4 +1,4 @@
-﻿#include "main.h"
+#include "main.h"
 #include "menu_handler.h"
 
 DECLARE_COMPONENT_VERSION(
@@ -9,4 +9,4 @@ DECLARE_COMPONENT_VERSION(
     "Uses OpenRouter API for AI processing"
 );
 
-VALIDATE_COMPONENT_FILENAME("foo_ai_metadata.dll");
+VALIDATE_COMPONENT_FILENAME("foo_metadata_enhancer.dll");

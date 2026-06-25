@@ -58,7 +58,7 @@ static std::string get_profile_path() {
 
 static std::string get_dll_dir() {
     char dll_path[MAX_PATH] = {0};
-    HMODULE hModule = GetModuleHandleA("foo_ai_metadata.dll");
+    HMODULE hModule = GetModuleHandleA("foo_metadata_enhancer.dll");
     if (hModule) {
         GetModuleFileNameA(hModule, dll_path, MAX_PATH);
         std::string dll_dir(dll_path);
@@ -88,7 +88,7 @@ bool AICore::initialize() {
     std::string dll_dir = get_dll_dir();
     
     if (cache_path_.empty() && !dll_dir.empty()) {
-        std::string base_dir = dll_dir + "\\foo_ai_metadata";
+        std::string base_dir = dll_dir + "\\foo_metadata_enhancer";
         std::string cache_dir = base_dir + "\\cache";
         std::string abort_dir = base_dir + "\\abort";
         
@@ -100,7 +100,7 @@ bool AICore::initialize() {
     }
     
     if (worker_path_.empty() && !dll_dir.empty()) {
-        worker_path_ = dll_dir + "\\foo_ai_metadata\\worker\\ai_worker.py";
+        worker_path_ = dll_dir + "\\foo_metadata_enhancer\\worker\\ai_worker.py";
     }
     
     Logger::instance().debug("initialize: cache_path = " + cache_path_, __FILE__, __FUNCTION__);
