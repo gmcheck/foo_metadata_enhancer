@@ -1,0 +1,190 @@
+# =============================================================================
+# AI Metadata Plugin Configuration
+# =============================================================================
+# This is a template configuration file.
+# Copy to config.yaml and fill in your API keys.
+# =============================================================================
+
+# Python Configuration
+python:
+  # Python executable path (leave empty to auto-detect)
+  python_path: ""
+  # Auto-install required packages on first run
+  auto_install_packages: false
+  # Requirements file path (relative to worker directory)
+  requirements_file: "requirements.txt"
+
+# AI Providers Configuration
+providers:
+  # Default AI provider
+  default: "zhipu"
+  
+  # Provider priority order (try in sequence until success)
+  priority_order:
+    - "zhipu"
+    - "gemini"
+    - "openrouter"
+    - "ollama"
+  
+  openrouter:
+    # OpenRouter API key (get from https://openrouter.ai/)
+    api_key: ""
+    # OpenRouter API base URL
+    base_url: "https://openrouter.ai/api/v1/chat/completions"
+    models:
+      - name: "openrouter/free"
+        priority: 1
+      - name: "z-ai/glm-4.5-air:free"
+        priority: 2
+      - name: "stepfun/step-3.5-flash:free"
+        priority: 3
+      - name: "google/gemma-3n-e4b-it:free"
+        priority: 4
+    extra_params:
+      temperature: 0.3
+  
+  zhipu:
+    # Zhipu AI API key (get from https://open.bigmodel.cn/)
+    api_key: ""
+    # Zhipu AI API base URL
+    base_url: "https://open.bigmodel.cn/api/paas/v4/chat/completions"
+    models:
+      - name: "glm-4.7-flash"
+        priority: 1
+      - name: "glm-4-Flash-250414"
+        priority: 2
+      - name: "glm-4.5-air"
+        priority: 3
+      - name: "glm-5"
+        priority: 4
+    extra_params:
+      temperature: 0.3
+  
+  gemini:
+    # Google Gemini API key (get from https://aistudio.google.com/)
+    api_key: ""
+    # Google Gemini API base URL
+    base_url: "https://generativelanguage.googleapis.com/v1beta/models"
+    models:
+      - name: "gemini-2.0-flash"
+        priority: 1
+      - name: "gemini-1.5-flash"
+        priority: 2
+      - name: "gemini-1.5-pro"
+        priority: 3
+    extra_params:
+      temperature: 0.3
+  
+  ollama:
+    # Enable Ollama local model
+    enabled: false
+    # Ollama API base URL
+    base_url: "http://localhost:11434/api/chat"
+    models:
+      - name: "llama3"
+        priority: 1
+      - name: "qwen2.5"
+        priority: 2
+      - name: "mistral"
+        priority: 3
+    extra_params:
+      num_ctx: 4096
+
+# Worker Configuration
+worker:
+  # Worker process pool size (currently single-threaded, not effective yet)
+  pool_size: 2
+  # Auto-restart worker process on abnormal exit
+  auto_restart: true
+  # Max retries for API request failures
+  max_retries: 3
+  # Max tracks per batch (for AI analysis internal batching)
+  batch_size: 20
+  # Base timeout for Python batch processing (ms), default 2 min
+  base_timeout_ms: 120000
+  # Per-track timeout (ms), default 1 min
+  per_track_timeout_ms: 60000
+  # Single AI API request timeout (ms), default 3 min
+  api_timeout_ms: 180000
+
+# Cache Configuration (C++ side)
+cache:
+  # Enable cache
+  enabled: true
+  # Cache entry expiration (days)
+  expiration_days: 365
+  # Max cache database size (MB)
+  max_size_mb: 500
+  # Auto cleanup expired cache
+  auto_cleanup: true
+
+# Logging Configuration
+logging:
+  # Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL
+  level: "WARNING"
+  # Max single log file size (bytes)
+  max_file_size: 10485760
+  # Number of log file backups to keep
+  backup_count: 5
+
+# Data Sources Configuration
+data_sources:
+  # Data source priority order (try in sequence until success)
+  priority_order:
+    - "musicbrainz"
+    - "discogs"
+    - "ai"
+  
+  # Candidate threshold - use AI as fallback when authoritative sources
+  # (MusicBrainz/Discogs) return fewer candidates than this value
+  candidate_threshold: 3
+  
+  # Max concurrent query threads
+  max_concurrent: 3
+  # Concurrent query timeout (seconds)
+  fetch_timeout: 120
+  
+  # MusicBrainz Configuration (HTTP Mode)
+  musicbrainz:
+    # Enable MusicBrainz
+    enabled: true
+    # API base URL (recording endpoint)
+    api_url: "https://musicbrainz.org/ws/2/recording"
+    # User-Agent (MusicBrainz requires format: name/version (contact))
+    user_agent_name: "foo_ai_metadata"
+    user_agent_version: "1.0"
+    user_agent_contact: "https://github.com/yourusername/foo_ai_metadata"
+    # Rate limit (requests per minute, MusicBrainz limits to 1/sec)
+    rate_limit_rpm: 50
+    # HTTP request timeout (seconds)
+    timeout: 30
+    # Retries per page (with exponential backoff)
+    retries: 3
+    # Page size: results per page
+    page_size: 10
+    # Max pages to query
+    max_pages: 2
+    # Score threshold: high-quality match threshold (0-100)
+    score_threshold: 85
+    # Score margin: min gap between best and second-best to avoid false matches
+    score_margin: 10
+  
+  # Discogs Configuration
+  discogs:
+    # Enable Discogs
+    enabled: false
+    # API base URL
+    api_url: "https://api.discogs.com"
+    # Consumer Key (apply at https://www.discogs.com/developers/app)
+    consumer_key: ""
+    # Consumer Secret (apply at https://www.discogs.com/developers/app)
+    consumer_secret: ""
+    # Rate limit (requests per minute)
+    rate_limit_rpm: 60
+  
+  # AI Data Source Configuration (as supplementary source)
+  ai:
+    # Enable AI as supplementary data source
+    enabled: true
+    # Only use as fallback when candidates < candidate_threshold
+    fallback_only: true
