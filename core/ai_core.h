@@ -148,6 +148,12 @@ public:
     void set_ai_batch_size(uint32_t size) { ai_batch_size_ = size; }
     
     /**
+     * @brief 动态更新Worker的日志级别（无需重启worker）
+     * @param level_name 日志级别名称 (DEBUG/INFO/WARNING/ERROR)
+     */
+    void update_worker_log_level(const std::string& level_name);
+    
+    /**
      * @brief 获取缓存统计信息
      * @return 缓存统计结构体
      */

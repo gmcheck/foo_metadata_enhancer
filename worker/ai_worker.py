@@ -273,6 +273,32 @@ def process_shutdown(request: Dict) -> Dict:
     return create_response(request.get("id", ""), success=True, results=[{"shutdown": True}])
 
 
+def process_set_log_level(request: Dict) -> Dict:
+    """动态更新日志级别
+    
+    Args:
+        request: 请求字典，params.level 为日志级别字符串 (DEBUG/INFO/WARNING/ERROR)
+    
+    Returns:
+        Dict: 响应字典
+    """
+    import logging
+    
+    request_id = request.get("id", str(uuid.uuid4()))
+    params = request.get("params", {})
+    level_name = params.get("level", "INFO").upper()
+    level = getattr(logging, level_name, logging.INFO)
+    
+    root_logger = logging.getLogger()
+    root_logger.setLevel(level)
+    for handler in root_logger.handlers:
+        handler.setLevel(level)
+    
+    logger.info(f"Log level updated to {level_name}")
+    
+    return create_response(request_id, success=True, results=[{"log_level": level_name}])
+
+
 def process_test_api(request: Dict) -> Dict:
     """处理API测试请求
     
@@ -573,6 +599,8 @@ def handle_request(request: Dict) -> Optional[Dict]:
         return process_stage1_scrape(request)
     elif method == "stage2_enhance":
         return process_stage2_enhance(request)
+    elif method == "set_log_level":
+        return process_set_log_level(request)
     else:
         return create_error_response(request_id, "INVALID_JSON", f"Unknown method: {method}", task_id=task_id)
 

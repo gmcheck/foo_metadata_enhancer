@@ -67,8 +67,6 @@ void SettingsManager::ensure_initialized() const {
 }
 
 void SettingsManager::do_ensure_initialized() {
-    console::print("[AI Metadata] [preferences_page.cpp::do_ensure_initialized] Starting initialization");
-    
     m_config_path = core_api::get_profile_path();
     
     if (m_config_path.find("file://") == 0) {
@@ -79,26 +77,11 @@ void SettingsManager::do_ensure_initialized() {
     CreateDirectoryA(m_config_path.c_str(), NULL);
     m_config_path += "\\settings.json";
     
-    log_format("[AI Metadata] [preferences_page.cpp::do_ensure_initialized] Config path = ", m_config_path.c_str());
-    
-    log_format("[AI Metadata] [preferences_page.cpp::do_ensure_initialized] Calling load_from_config_yaml()");
     load_from_config_yaml();
-    
-    log_format("[AI Metadata] [preferences_page.cpp::do_ensure_initialized] Calling load()");
     load();
-    
-    log_format("[AI Metadata] [preferences_page.cpp::do_ensure_initialized] Setting auto_install_packages = ", m_settings.auto_install_packages ? "true" : "false");
+    Logger::instance().set_log_level(m_settings.log_level);
     set_auto_install_packages(m_settings.auto_install_packages);
-    
-    log_format("[AI Metadata] [preferences_page.cpp::do_ensure_initialized] Calling save()");
     save();
-    
-    console::print("[AI Metadata] [preferences_page.cpp::do_ensure_initialized] Initialization complete");
-    log_format("[AI Metadata] [preferences_page.cpp::do_ensure_initialized] Provider = ", static_cast<int>(m_settings.provider));
-    
-    for (const auto& [p, config] : m_settings.provider_configs) {
-        log_format("[AI Metadata] [preferences_page.cpp::do_ensure_initialized] Provider ", static_cast<int>(p), " has ", static_cast<int>(config.models.size()), " models, selected_model = ", config.selected_model.c_str());
-    }
     
     m_initialized = true;
 }
@@ -151,43 +134,33 @@ static std::string get_dll_directory() {
 }
 
 void SettingsManager::load_from_config_yaml() {
-    console::print("[AI Metadata] load_from_config_yaml: Starting");
-    
     std::string yaml_path;
-    
     std::ifstream file;
     
     std::string dll_dir = get_dll_directory();
-    log_format("[AI Metadata] load_from_config_yaml: DLL dir = ", dll_dir.c_str());
     
     yaml_path = dll_dir + "\\foo_metadata_enhancer\\worker\\config.yaml";
-    log_format("[AI Metadata] load_from_config_yaml: Trying path 1 = ", yaml_path.c_str());
     file.open(yaml_path);
     
     if (!file.is_open()) {
         yaml_path = dll_dir + "\\..\\foo_metadata_enhancer\\worker\\config.yaml";
-        log_format("[AI Metadata] load_from_config_yaml: Trying path 2 = ", yaml_path.c_str());
         file.open(yaml_path);
     }
     
     if (!file.is_open()) {
         yaml_path = dll_dir + "\\config.yaml";
-        log_format("[AI Metadata] load_from_config_yaml: Trying path 3 = ", yaml_path.c_str());
         file.open(yaml_path);
     }
     
     if (!file.is_open()) {
         yaml_path = dll_dir + "\\worker\\config.yaml";
-        log_format("[AI Metadata] load_from_config_yaml: Trying path 4 = ", yaml_path.c_str());
         file.open(yaml_path);
     }
     
     if (!file.is_open()) {
-        console::print("[AI Metadata] load_from_config_yaml: Failed to open config.yaml");
+        Logger::instance().warning("load_from_config_yaml: Failed to open config.yaml");
         return;
     }
-    
-    console::print("[AI Metadata] load_from_config_yaml: Successfully opened config.yaml");
     
     std::string line;
     std::string current_provider;
@@ -202,11 +175,8 @@ void SettingsManager::load_from_config_yaml() {
     bool in_musicbrainz_section = false;
     bool in_discogs_section = false;
     bool in_ai_section = false;
-    int line_num = 0;
     
     while (std::getline(file, line)) {
-        line_num++;
-        
         if (line.find("python:") != std::string::npos) {
             in_python_section = true;
             in_providers_section = false;
@@ -215,7 +185,6 @@ void SettingsManager::load_from_config_yaml() {
             in_logging_section = false;
             in_provider = false;
             in_models = false;
-            log_format("[AI Metadata] load_from_config_yaml: Line ", line_num, " - Found python section");
             continue;
         }
         
@@ -225,7 +194,6 @@ void SettingsManager::load_from_config_yaml() {
             in_python_section = false;
             in_worker_section = false;
             in_logging_section = false;
-            log_format("[AI Metadata] load_from_config_yaml: Line ", line_num, " - Found providers section");
             continue;
         }
         
@@ -237,7 +205,6 @@ void SettingsManager::load_from_config_yaml() {
             in_python_section = false;
             in_worker_section = false;
             in_logging_section = false;
-            log_format("[AI Metadata] load_from_config_yaml: Line ", line_num, " - Found cache section");
             continue;
         }
         
@@ -249,7 +216,6 @@ void SettingsManager::load_from_config_yaml() {
             in_cache_section = false;
             in_python_section = false;
             in_logging_section = false;
-            log_format("[AI Metadata] load_from_config_yaml: Line ", line_num, " - Found worker section");
             continue;
         }
         
@@ -261,7 +227,6 @@ void SettingsManager::load_from_config_yaml() {
             in_cache_section = false;
             in_python_section = false;
             in_worker_section = false;
-            log_format("[AI Metadata] load_from_config_yaml: Line ", line_num, " - Found logging section");
             continue;
         }
         
@@ -274,7 +239,6 @@ void SettingsManager::load_from_config_yaml() {
             in_python_section = false;
             in_worker_section = false;
             in_logging_section = false;
-            log_format("[AI Metadata] load_from_config_yaml: Line ", line_num, " - Found data_sources section");
             continue;
         }
         
@@ -283,10 +247,8 @@ void SettingsManager::load_from_config_yaml() {
                 size_t pos = line.find(':');
                 if (pos != std::string::npos) {
                     m_settings.python_path = trim_string(line.substr(pos + 1));
-                    log_format("[AI Metadata] load_from_config_yaml: Line ", line_num, " - python_path = ", m_settings.python_path.c_str());
                     if (!m_settings.python_path.empty()) {
                         set_python_path(m_settings.python_path);
-                        log_format("[AI Metadata] load_from_config_yaml: Set global python_path to ", m_settings.python_path.c_str());
                     }
                 }
             }
@@ -405,7 +367,6 @@ void SettingsManager::load_from_config_yaml() {
                     if (pos != std::string::npos) {
                         std::string val = trim_string(line.substr(pos + 1));
                         m_settings.enable_musicbrainz = (val == "true");
-                        log_format("[AI Metadata] load_from_config_yaml: enable_musicbrainz = ", m_settings.enable_musicbrainz ? "true" : "false");
                     }
                 }
                 else if (line.find("timeout:") != std::string::npos && first_non_ws == 4) {
@@ -471,7 +432,18 @@ void SettingsManager::load_from_config_yaml() {
                     if (pos != std::string::npos) {
                         std::string val = trim_string(line.substr(pos + 1));
                         m_settings.enable_discogs = (val == "true");
-                        log_format("[AI Metadata] load_from_config_yaml: enable_discogs = ", m_settings.enable_discogs ? "true" : "false");
+                    }
+                }
+                else if (line.find("consumer_key:") != std::string::npos) {
+                    size_t pos = line.find(':');
+                    if (pos != std::string::npos) {
+                        m_settings.discogs_consumer_key = trim_string(line.substr(pos + 1));
+                    }
+                }
+                else if (line.find("consumer_secret:") != std::string::npos) {
+                    size_t pos = line.find(':');
+                    if (pos != std::string::npos) {
+                        m_settings.discogs_consumer_secret = trim_string(line.substr(pos + 1));
                     }
                 }
             }
@@ -481,7 +453,6 @@ void SettingsManager::load_from_config_yaml() {
                     if (pos != std::string::npos) {
                         std::string val = trim_string(line.substr(pos + 1));
                         m_settings.enable_ai = (val == "true");
-                        log_format("[AI Metadata] load_from_config_yaml: enable_ai = ", m_settings.enable_ai ? "true" : "false");
                     }
                 }
             }
@@ -495,7 +466,6 @@ void SettingsManager::load_from_config_yaml() {
             if (pos != std::string::npos) {
                 std::string default_provider = trim_string(line.substr(pos + 1));
                 m_settings.provider = string_to_provider(default_provider);
-                log_format("[AI Metadata] load_from_config_yaml: Line ", line_num, " - Default provider = ", default_provider.c_str());
             }
         }
         else if (line.find("openrouter:") != std::string::npos || 
@@ -507,7 +477,6 @@ void SettingsManager::load_from_config_yaml() {
                 current_provider = trim_string(line.substr(0, pos));
                 in_provider = true;
                 in_models = false;
-                log_format("[AI Metadata] load_from_config_yaml: Line ", line_num, " - Found provider: ", current_provider.c_str());
             }
         }
         else if (in_provider && line.find("api_key:") != std::string::npos) {
@@ -515,7 +484,6 @@ void SettingsManager::load_from_config_yaml() {
             if (pos != std::string::npos) {
                 AIProvider p = string_to_provider(current_provider);
                 m_settings.provider_configs[p].api_key = trim_string(line.substr(pos + 1));
-                log_format("[AI Metadata] load_from_config_yaml: Line ", line_num, " - API key loaded for ", current_provider.c_str());
             }
         }
         else if (in_provider && line.find("base_url:") != std::string::npos) {
@@ -527,7 +495,6 @@ void SettingsManager::load_from_config_yaml() {
         }
         else if (in_provider && line.find("models:") != std::string::npos) {
             in_models = true;
-            log_format("[AI Metadata] load_from_config_yaml: Line ", line_num, " - Found models section for ", current_provider.c_str());
         }
         else if (in_models && line.find("- name:") != std::string::npos) {
             size_t pos = line.find("name:");
@@ -538,7 +505,6 @@ void SettingsManager::load_from_config_yaml() {
                 mi.name = model_name;
                 mi.priority = 999;
                 m_settings.provider_configs[p].models.push_back(mi);
-                log_format("[AI Metadata] load_from_config_yaml: Line ", line_num, " - Added model: ", model_name.c_str(), " for ", current_provider.c_str());
             }
         }
         else if (in_models && line.find("priority:") != std::string::npos) {
@@ -598,16 +564,13 @@ void SettingsManager::load_from_config_yaml() {
 }
 
 void SettingsManager::load() {
-    log_format("[AI Metadata] [preferences_page.cpp::load] Loading from ", m_config_path.c_str());
     std::ifstream file(m_config_path);
     if (!file.is_open()) {
-        log_format("[AI Metadata] [preferences_page.cpp::load] File not found or cannot open");
         return;
     }
     
     std::string content((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
     file.close();
-    log_format("[AI Metadata] [preferences_page.cpp::load] File content length = ", static_cast<int>(content.length()));
     
     auto get_value = [&content](const std::string& key) -> std::string {
         std::string search = "\"" + key + "\":";
@@ -729,6 +692,16 @@ void SettingsManager::load() {
         m_settings.mb_rate_limit = std::stoi(mb_rate_limit);
     }
     
+    std::string discogs_key = get_value("discogs_consumer_key");
+    if (!discogs_key.empty()) {
+        m_settings.discogs_consumer_key = discogs_key;
+    }
+    
+    std::string discogs_secret = get_value("discogs_consumer_secret");
+    if (!discogs_secret.empty()) {
+        m_settings.discogs_consumer_secret = discogs_secret;
+    }
+    
     std::string log_level = get_value("log_level");
     if (!log_level.empty()) {
         m_settings.log_level = static_cast<ai_metadata::constants::LogLevel>(std::stoi(log_level));
@@ -740,7 +713,6 @@ void SettingsManager::load() {
     }
     
     size_t pc_pos = content.find("\"provider_configs\":");
-    log_format("[AI Metadata] [preferences_page.cpp::load] provider_configs position = ", static_cast<int>(pc_pos));
     if (pc_pos != std::string::npos) {
         size_t pc_start = content.find('{', pc_pos);
         if (pc_start != std::string::npos) {
@@ -752,7 +724,6 @@ void SettingsManager::load() {
                 pc_end++;
             }
             std::string pc_str = content.substr(pc_start, pc_end - pc_start);
-            log_format("[AI Metadata] [preferences_page.cpp::load] provider_configs content length = ", static_cast<int>(pc_str.length()));
             
             const char* prov_names[] = {"openrouter", "zhipu", "gemini", "ollama"};
             AIProvider prov_types[] = {AIProvider::OpenRouter, AIProvider::Zhipu, AIProvider::Gemini, AIProvider::Ollama};
@@ -760,7 +731,6 @@ void SettingsManager::load() {
             for (int i = 0; i < 4; i++) {
                 std::string search_name = std::string("\"") + prov_names[i] + "\":";
                 size_t prov_pos = pc_str.find(search_name);
-                log_format("[AI Metadata] [preferences_page.cpp::load] Searching for ", prov_names[i], ", position = ", static_cast<int>(prov_pos));
                 if (prov_pos == std::string::npos) continue;
                 
                 size_t prov_start = pc_str.find('{', prov_pos);
@@ -774,10 +744,8 @@ void SettingsManager::load() {
                     prov_end++;
                 }
                 std::string prov_str = pc_str.substr(prov_start, prov_end - prov_start);
-                log_format("[AI Metadata] [preferences_page.cpp::load] ", prov_names[i], " config: ", prov_str.c_str());
                 
                 size_t sm_pos = prov_str.find("\"selected_model\":");
-                log_format("[AI Metadata] [preferences_page.cpp::load] ", prov_names[i], " selected_model position = ", static_cast<int>(sm_pos));
                 if (sm_pos != std::string::npos) {
                     size_t val_start = prov_str.find('"', sm_pos + 17);
                     if (val_start != std::string::npos) {
@@ -785,7 +753,6 @@ void SettingsManager::load() {
                         if (val_end != std::string::npos) {
                             std::string sel_model = prov_str.substr(val_start + 1, val_end - val_start - 1);
                             m_settings.provider_configs[prov_types[i]].selected_model = sel_model;
-                            log_format("[AI Metadata] load: ", prov_names[i], " selected_model = ", sel_model.c_str());
                         }
                     }
                 }
@@ -846,6 +813,8 @@ void SettingsManager::save() {
         file << "  \"mb_score_threshold\": " << m_settings.mb_score_threshold << ",\n";
         file << "  \"mb_score_margin\": " << m_settings.mb_score_margin << ",\n";
         file << "  \"mb_rate_limit\": " << m_settings.mb_rate_limit << ",\n";
+        file << "  \"discogs_consumer_key\": \"" << m_settings.discogs_consumer_key << "\",\n";
+        file << "  \"discogs_consumer_secret\": \"" << m_settings.discogs_consumer_secret << "\",\n";
         file << "  \"log_level\": " << static_cast<int>(m_settings.log_level) << ",\n";
         file << "  \"max_log_file_size_mb\": " << m_settings.max_log_file_size_mb << "\n";
         file << "}\n";
@@ -1022,6 +991,7 @@ t_uint32 AIPreferencePageInstance::get_state() {
 }
 
 void AIPreferencePageInstance::apply() {
+    auto old_log_level = SettingsManager::instance().settings().log_level;
     save_settings();
     SettingsManager::instance().settings() = m_settings;
     SettingsManager::instance().save();
@@ -1033,6 +1003,12 @@ void AIPreferencePageInstance::apply() {
         ai_core->set_config("auto_cleanup", m_settings.auto_cleanup ? "true" : "false");
         ai_core->set_taskqueue_batch_size(m_settings.taskqueue_batch_size);
         ai_core->set_ai_batch_size(m_settings.ai_batch_size);
+        
+        // 日志级别变更时，动态通知Python worker（无需重启）
+        if (m_settings.log_level != old_log_level) {
+            std::string level_name = constants::log_level_to_string(m_settings.log_level);
+            ai_core->update_worker_log_level(level_name);
+        }
     }
     
     m_modified = false;
@@ -1064,7 +1040,6 @@ INT_PTR CALLBACK AIPreferencePageInstance::dialog_proc(HWND wnd, UINT msg, WPARA
         case WM_TIMER:
             if (wp == FILL_COMBO_TIMER_ID) {
                 KillTimer(wnd, FILL_COMBO_TIMER_ID);
-                console::print("[AI Metadata] dialog_proc: WM_TIMER - filling combo boxes");
                 self->fill_combo_boxes();
             }
             break;
@@ -1073,7 +1048,6 @@ INT_PTR CALLBACK AIPreferencePageInstance::dialog_proc(HWND wnd, UINT msg, WPARA
             return TRUE;
             
         case WM_FILL_COMBO_BOXES:
-            console::print("[AI Metadata] dialog_proc: WM_FILL_COMBO_BOXES - filling combo boxes");
             self->fill_combo_boxes();
             return TRUE;
             
@@ -1093,6 +1067,8 @@ INT_PTR CALLBACK AIPreferencePageInstance::dialog_proc(HWND wnd, UINT msg, WPARA
                 case IDC_MB_SCORE_MARGIN:
                 case IDC_MB_RATE_LIMIT:
                 case IDC_LOG_SIZE:
+                case IDC_DISCOGS_KEY:
+                case IDC_DISCOGS_SECRET:
                     if (HIWORD(wp) == EN_CHANGE) {
                         self->on_changed();
                     }
@@ -1104,9 +1080,6 @@ INT_PTR CALLBACK AIPreferencePageInstance::dialog_proc(HWND wnd, UINT msg, WPARA
                 case IDC_AUTO_RESTART:
                 case IDC_SHOW_PROGRESS_PREF:
                 case IDC_AUTO_INSTALL_PACKAGES:
-                case IDC_MENU_CACHE_STATS:
-                case IDC_MENU_ROLLBACK:
-                case IDC_MENU_CLEAR_CACHE:
                 case IDC_ENABLE_MUSICBRAINZ:
                 case IDC_ENABLE_DISCOGS:
                 case IDC_ENABLE_AI:
@@ -1153,74 +1126,34 @@ INT_PTR CALLBACK AIPreferencePageInstance::dialog_proc(HWND wnd, UINT msg, WPARA
 }
 
 void AIPreferencePageInstance::on_init_dialog() {
-    console::print("[AI Metadata] on_init_dialog: Starting");
     update_controls();
 }
 
 void AIPreferencePageInstance::fill_combo_boxes() {
-    console::print("[AI Metadata] fill_combo_boxes: Starting");
-    
     HWND combo = GetDlgItem(m_wnd, IDC_PROVIDER);
     if (combo) {
-        console::print("[AI Metadata] fill_combo_boxes: Adding provider items");
-        log_format("[AI Metadata] fill_combo_boxes: IDC_PROVIDER handle = ", (intptr_t)combo);
-        
         SendMessageW(combo, CB_RESETCONTENT, 0, 0);
-        int count_after_reset = (int)SendMessageW(combo, CB_GETCOUNT, 0, 0);
-        log_format("[AI Metadata] fill_combo_boxes: After reset, count = ", count_after_reset);
-        
-        LRESULT result = SendMessageW(combo, CB_INSERTSTRING, 0, (LPARAM)L"OpenRouter");
-        log_format("[AI Metadata] fill_combo_boxes: InsertString result = ", result);
-        int count = (int)SendMessageW(combo, CB_GETCOUNT, 0, 0);
-        log_format("[AI Metadata] fill_combo_boxes: After insert 0, count = ", count);
-        
-        result = SendMessageW(combo, CB_INSERTSTRING, 1, (LPARAM)L"Zhipu (智谱)");
-        log_format("[AI Metadata] fill_combo_boxes: InsertString result = ", result);
-        count = (int)SendMessageW(combo, CB_GETCOUNT, 0, 0);
-        log_format("[AI Metadata] fill_combo_boxes: After insert 1, count = ", count);
-        
-        result = SendMessageW(combo, CB_INSERTSTRING, 2, (LPARAM)L"Gemini");
-        log_format("[AI Metadata] fill_combo_boxes: InsertString result = ", result);
-        count = (int)SendMessageW(combo, CB_GETCOUNT, 0, 0);
-        log_format("[AI Metadata] fill_combo_boxes: After insert 2, count = ", count);
-        
-        result = SendMessageW(combo, CB_INSERTSTRING, 3, (LPARAM)L"Ollama");
-        log_format("[AI Metadata] fill_combo_boxes: InsertString result = ", result);
-        count = (int)SendMessageW(combo, CB_GETCOUNT, 0, 0);
-        log_format("[AI Metadata] fill_combo_boxes: After insert 3, count = ", count);
-        
+        SendMessageW(combo, CB_INSERTSTRING, 0, (LPARAM)L"OpenRouter");
+        SendMessageW(combo, CB_INSERTSTRING, 1, (LPARAM)L"Zhipu (智谱)");
+        SendMessageW(combo, CB_INSERTSTRING, 2, (LPARAM)L"Gemini");
+        SendMessageW(combo, CB_INSERTSTRING, 3, (LPARAM)L"Ollama");
         SendMessageW(combo, CB_SETCURSEL, static_cast<int>(m_settings.provider), 0);
-        log_format("[AI Metadata] fill_combo_boxes: Set provider to ", static_cast<int>(m_settings.provider));
-        
         update_model_combo();
-    } else {
-        console::print("[AI Metadata] fill_combo_boxes: IDC_PROVIDER not found in this page");
     }
     
     combo = GetDlgItem(m_wnd, IDC_LOG_LEVEL);
     if (combo) {
-        console::print("[AI Metadata] fill_combo_boxes: Adding log level items");
         SendMessageW(combo, CB_RESETCONTENT, 0, 0);
-        
         SendMessageW(combo, CB_INSERTSTRING, 0, (LPARAM)L"DEBUG");
         SendMessageW(combo, CB_INSERTSTRING, 1, (LPARAM)L"INFO");
         SendMessageW(combo, CB_INSERTSTRING, 2, (LPARAM)L"WARNING");
         SendMessageW(combo, CB_INSERTSTRING, 3, (LPARAM)L"ERROR");
-        
-        int count = (int)SendMessageW(combo, CB_GETCOUNT, 0, 0);
-        log_format("[AI Metadata] fill_combo_boxes: Log level combo count = ", count);
-        
         SendMessageW(combo, CB_SETCURSEL, static_cast<int>(m_settings.log_level), 0);
-        log_format("[AI Metadata] fill_combo_boxes: Set log level to ", static_cast<int>(m_settings.log_level));
         Logger::instance().set_log_level(m_settings.log_level);
-    } else {
-        console::print("[AI Metadata] fill_combo_boxes: IDC_LOG_LEVEL not found in this page");
     }
 }
 
 void AIPreferencePageInstance::update_controls() {
-    console::print("[AI Metadata] update_controls: Starting");
-    
     if (GetDlgItem(m_wnd, IDC_USE_ENV_KEY)) {
         CheckDlgButton(m_wnd, IDC_USE_ENV_KEY, m_settings.use_env_key ? BST_CHECKED : BST_UNCHECKED);
     }
@@ -1305,22 +1238,18 @@ void AIPreferencePageInstance::update_controls() {
     if (GetDlgItem(m_wnd, IDC_ENABLE_DISCOGS)) {
         CheckDlgButton(m_wnd, IDC_ENABLE_DISCOGS, m_settings.enable_discogs ? BST_CHECKED : BST_UNCHECKED);
     }
+    if (GetDlgItem(m_wnd, IDC_DISCOGS_KEY)) {
+        SetDlgItemTextA(m_wnd, IDC_DISCOGS_KEY, m_settings.discogs_consumer_key.c_str());
+    }
+    if (GetDlgItem(m_wnd, IDC_DISCOGS_SECRET)) {
+        SetDlgItemTextA(m_wnd, IDC_DISCOGS_SECRET, m_settings.discogs_consumer_secret.c_str());
+    }
     if (GetDlgItem(m_wnd, IDC_ENABLE_AI)) {
         CheckDlgButton(m_wnd, IDC_ENABLE_AI, m_settings.enable_ai ? BST_CHECKED : BST_UNCHECKED);
     }
     
     if (GetDlgItem(m_wnd, IDC_LOG_SIZE)) {
         SetDlgItemInt(m_wnd, IDC_LOG_SIZE, m_settings.max_log_file_size_mb, FALSE);
-    }
-    
-    if (GetDlgItem(m_wnd, IDC_MENU_CACHE_STATS)) {
-        CheckDlgButton(m_wnd, IDC_MENU_CACHE_STATS, m_settings.menu_cache_stats ? BST_CHECKED : BST_UNCHECKED);
-    }
-    if (GetDlgItem(m_wnd, IDC_MENU_ROLLBACK)) {
-        CheckDlgButton(m_wnd, IDC_MENU_ROLLBACK, m_settings.menu_rollback ? BST_CHECKED : BST_UNCHECKED);
-    }
-    if (GetDlgItem(m_wnd, IDC_MENU_CLEAR_CACHE)) {
-        CheckDlgButton(m_wnd, IDC_MENU_CLEAR_CACHE, m_settings.menu_clear_cache ? BST_CHECKED : BST_UNCHECKED);
     }
 }
 
@@ -1340,39 +1269,22 @@ void AIPreferencePageInstance::update_api_key_for_provider() {
 }
 
 void AIPreferencePageInstance::update_model_combo() {
-    console::print("[AI Metadata] update_model_combo: Starting");
-    
     HWND combo = GetDlgItem(m_wnd, IDC_MODEL);
-    if (!combo) {
-        console::print("[AI Metadata] update_model_combo: ERROR - IDC_MODEL not found");
-        return;
-    }
+    if (!combo) return;
     
-    log_format("[AI Metadata] update_model_combo: IDC_MODEL handle = ", (intptr_t)combo);
-    
-    console::print("[AI Metadata] update_model_combo: Resetting IDC_MODEL content");
     SendMessageW(combo, CB_RESETCONTENT, 0, 0);
-    int count_after_reset = (int)SendMessageW(combo, CB_GETCOUNT, 0, 0);
-    log_format("[AI Metadata] update_model_combo: After reset, count = ", count_after_reset);
     
     auto& config = m_settings.get_current_provider_config();
-    log_format("[AI Metadata] update_model_combo: Current provider has ", static_cast<int>(config.models.size()), " models");
     
     int select_index = -1;
     int current_index = 0;
     bool found_selected = false;
     
     for (const auto& model : config.models) {
-        LRESULT result = SendMessageA(combo, CB_INSERTSTRING, current_index, (LPARAM)model.name.c_str());
-        log_format("[AI Metadata] update_model_combo: Insert model ", current_index, ": ", model.name.c_str(), " (result=", result, ")");
-        
-        int count = (int)SendMessageA(combo, CB_GETCOUNT, 0, 0);
-        log_format("[AI Metadata] update_model_combo: After insert ", current_index, ", count = ", count);
-        
+        SendMessageA(combo, CB_INSERTSTRING, current_index, (LPARAM)model.name.c_str());
         if (model.name == config.selected_model) {
             select_index = current_index;
             found_selected = true;
-            log_format("[AI Metadata] update_model_combo: Selected model index = ", select_index);
         }
         current_index++;
     }
@@ -1381,20 +1293,13 @@ void AIPreferencePageInstance::update_model_combo() {
     if (!found_selected && !config.selected_model.empty()) {
         SendMessageA(combo, CB_INSERTSTRING, current_index, (LPARAM)config.selected_model.c_str());
         select_index = current_index;
-        log_format("[AI Metadata] update_model_combo: Added custom model: ", config.selected_model.c_str());
     }
     
     if (select_index >= 0) {
         SendMessageA(combo, CB_SETCURSEL, select_index, 0);
-        log_format("[AI Metadata] update_model_combo: Set selection to index ", select_index);
     } else if (!config.models.empty()) {
         SendMessageA(combo, CB_SETCURSEL, 0, 0);
-    } else {
-        console::print("[AI Metadata] update_model_combo: No models to display");
     }
-    
-    int count = (int)SendMessageA(combo, CB_GETCOUNT, 0, 0);
-    log_format("[AI Metadata] update_model_combo: IDC_MODEL count = ", count);
 }
 
 void AIPreferencePageInstance::save_settings() {
@@ -1499,6 +1404,16 @@ void AIPreferencePageInstance::save_settings() {
     if (GetDlgItem(m_wnd, IDC_ENABLE_DISCOGS)) {
         m_settings.enable_discogs = IsDlgButtonChecked(m_wnd, IDC_ENABLE_DISCOGS) == BST_CHECKED;
     }
+    if (GetDlgItem(m_wnd, IDC_DISCOGS_KEY)) {
+        char buffer[256] = {0};
+        GetDlgItemTextA(m_wnd, IDC_DISCOGS_KEY, buffer, 256);
+        m_settings.discogs_consumer_key = buffer;
+    }
+    if (GetDlgItem(m_wnd, IDC_DISCOGS_SECRET)) {
+        char buffer[256] = {0};
+        GetDlgItemTextA(m_wnd, IDC_DISCOGS_SECRET, buffer, 256);
+        m_settings.discogs_consumer_secret = buffer;
+    }
     if (GetDlgItem(m_wnd, IDC_ENABLE_AI)) {
         m_settings.enable_ai = IsDlgButtonChecked(m_wnd, IDC_ENABLE_AI) == BST_CHECKED;
     }
@@ -1510,16 +1425,6 @@ void AIPreferencePageInstance::save_settings() {
     }
     if (GetDlgItem(m_wnd, IDC_LOG_SIZE)) {
         m_settings.max_log_file_size_mb = GetDlgItemInt(m_wnd, IDC_LOG_SIZE, NULL, FALSE);
-    }
-    
-    if (GetDlgItem(m_wnd, IDC_MENU_CACHE_STATS)) {
-        m_settings.menu_cache_stats = IsDlgButtonChecked(m_wnd, IDC_MENU_CACHE_STATS) == BST_CHECKED;
-    }
-    if (GetDlgItem(m_wnd, IDC_MENU_ROLLBACK)) {
-        m_settings.menu_rollback = IsDlgButtonChecked(m_wnd, IDC_MENU_ROLLBACK) == BST_CHECKED;
-    }
-    if (GetDlgItem(m_wnd, IDC_MENU_CLEAR_CACHE)) {
-        m_settings.menu_clear_cache = IsDlgButtonChecked(m_wnd, IDC_MENU_CLEAR_CACHE) == BST_CHECKED;
     }
 }
 
@@ -1624,16 +1529,36 @@ void AIPreferencePageInstance::on_test_api() {
 }
 
 void AIPreferencePageInstance::on_open_log_folder() {
-    std::string log_path = core_api::get_profile_path();
-    log_path += "\\foo_metadata_enhancer\\logs";
+    // Use the same path as Logger (DLL directory, not profile path)
+    std::string dll_dir = get_dll_directory();
+    if (dll_dir.empty()) {
+        SetDlgItemTextA(m_wnd, IDC_WORKER_STATUS_TEXT, "Cannot find plugin directory");
+        return;
+    }
     
-    CreateDirectoryA(log_path.c_str(), NULL);
+    std::string base_dir = dll_dir + "\\foo_metadata_enhancer";
+    std::string log_dir = base_dir + "\\logs";
+    std::string log_file = log_dir + "\\core.log";
     
-    int len = MultiByteToWideChar(CP_UTF8, 0, log_path.c_str(), -1, NULL, 0);
-    std::wstring wpath(len, 0);
-    MultiByteToWideChar(CP_UTF8, 0, log_path.c_str(), -1, &wpath[0], len);
+    // Create intermediate directories (CreateDirectoryA only creates the leaf)
+    CreateDirectoryA(base_dir.c_str(), NULL);
+    CreateDirectoryA(log_dir.c_str(), NULL);
     
-    ShellExecuteW(NULL, L"explore", wpath.c_str(), NULL, NULL, SW_SHOWNORMAL);
+    // Use explorer.exe /select to reliably open Explorer and select the log file
+    int len = MultiByteToWideChar(CP_UTF8, 0, log_file.c_str(), -1, NULL, 0);
+    std::wstring wlog_file(len, 0);
+    MultiByteToWideChar(CP_UTF8, 0, log_file.c_str(), -1, &wlog_file[0], len);
+    
+    std::wstring params = L"/select,\"" + wlog_file + L"\"";
+    HINSTANCE result = ShellExecuteW(NULL, NULL, L"explorer.exe", params.c_str(), NULL, SW_SHOWNORMAL);
+    
+    if ((INT_PTR)result <= 32) {
+        // Fallback: try opening the folder directly
+        len = MultiByteToWideChar(CP_UTF8, 0, log_dir.c_str(), -1, NULL, 0);
+        std::wstring wlog_dir(len, 0);
+        MultiByteToWideChar(CP_UTF8, 0, log_dir.c_str(), -1, &wlog_dir[0], len);
+        ShellExecuteW(NULL, L"open", wlog_dir.c_str(), NULL, NULL, SW_SHOWNORMAL);
+    }
 }
 
 void AIPreferencePageInstance::on_clear_cache() {
@@ -1659,16 +1584,25 @@ void AIPreferencePageInstance::on_clear_cache() {
 
 void AIPreferencePageInstance::on_restart_workers() {
     AICore* ai_core = get_ai_core_instance();
-    if (ai_core) {
-        ai_core->restart_all_workers();
-        SetDlgItemTextA(m_wnd, IDC_STATUS_TEXT, "Workers restarted successfully");
-        
-        auto workers = ai_core->get_worker_info();
-        if (!workers.empty() && workers[0].status == "running") {
-            SetDlgItemTextA(m_wnd, IDC_WORKER_STATUS_TEXT, "Status: Healthy");
+    if (!ai_core) {
+        SetDlgItemTextA(m_wnd, IDC_WORKER_STATUS_TEXT, "Core not initialized");
+        return;
+    }
+    
+    SetDlgItemTextA(m_wnd, IDC_WORKER_STATUS_TEXT, "Restarting...");
+    
+    bool success = ai_core->restart_all_workers();
+    
+    if (success) {
+        // Check worker health after restart (restart is synchronous: stop + start)
+        bool healthy = ai_core->is_worker_healthy();
+        if (healthy) {
+            SetDlgItemTextA(m_wnd, IDC_WORKER_STATUS_TEXT, "Status: Running");
         } else {
-            SetDlgItemTextA(m_wnd, IDC_WORKER_STATUS_TEXT, "Status: Not Running");
+            SetDlgItemTextA(m_wnd, IDC_WORKER_STATUS_TEXT, "Status: Starting...");
         }
+    } else {
+        SetDlgItemTextA(m_wnd, IDC_WORKER_STATUS_TEXT, "Status: Failed");
     }
 }
 

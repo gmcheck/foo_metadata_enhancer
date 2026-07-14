@@ -161,7 +161,7 @@ bool WorkerManager::initialize() {
     worker_ = std::make_unique<WorkerProcess>();
     worker_->id = 0;
     
-    if (!start_worker()) {
+    if (!start_worker_locked()) {
         LOG_ERROR("initialize: Failed to start worker");
         return false;
     }
@@ -185,7 +185,7 @@ void WorkerManager::shutdown() {
     }
 }
 
-bool WorkerManager::start_worker() {
+bool WorkerManager::start_worker_locked() {
     auto& worker = worker_;
     
     Logger::instance().debug("start_worker: Creating pipes for worker", __FILE__, __FUNCTION__);
@@ -294,9 +294,7 @@ bool WorkerManager::start_worker() {
     return true;
 }
 
-void WorkerManager::stop_worker() {
-    std::lock_guard<std::mutex> lock(worker_mutex_);
-    
+void WorkerManager::stop_worker_locked() {
     if (!worker_ || !worker_->is_running) {
         return;
     }
@@ -329,6 +327,16 @@ void WorkerManager::stop_worker() {
         CloseHandle(worker_->hStderrRead);
         worker_->hStderrRead = nullptr;
     }
+}
+
+bool WorkerManager::start_worker() {
+    std::lock_guard<std::mutex> lock(worker_mutex_);
+    return start_worker_locked();
+}
+
+void WorkerManager::stop_worker() {
+    std::lock_guard<std::mutex> lock(worker_mutex_);
+    stop_worker_locked();
 }
 
 void WorkerManager::worker_read_loop() {
@@ -438,7 +446,7 @@ void WorkerManager::worker_read_loop() {
                         stderr_str.pop_back();
                     }
                     if (!stderr_str.empty()) {
-                        Logger::instance().debug("worker_read_loop: [Python stderr] " + stderr_str, __FILE__, __FUNCTION__);
+                        Logger::instance().info("worker_read_loop: [Python stderr] " + stderr_str, __FILE__, __FUNCTION__);
                     }
                 }
             }
@@ -696,8 +704,8 @@ void WorkerManager::restart_worker() {
     std::lock_guard<std::mutex> lock(worker_mutex_);
     
     if (worker_) {
-        stop_worker();
-        start_worker();
+        stop_worker_locked();
+        start_worker_locked();
     }
 }
 
@@ -758,7 +766,7 @@ void WorkerManager::force_restart_worker() {
             worker_->is_running = false;
             worker_->queue_size = 0;
             
-            if (!start_worker()) {
+            if (!start_worker_locked()) {
                 LOG_ERROR("force_restart_worker: Failed to restart worker");
             } else {
                 LOG_INFO("force_restart_worker: Worker restarted successfully");

@@ -196,6 +196,28 @@ void AICore::set_config(const std::string& key, const std::string& value) {
     }
 }
 
+void AICore::update_worker_log_level(const std::string& level_name) {
+    if (!worker_manager_) {
+        return;
+    }
+    
+    std::string request_id = generate_uuid();
+    nlohmann::json request;
+    request["id"] = request_id;
+    request["method"] = "set_log_level";
+    request["jsonrpc"] = "2.0";
+    nlohmann::json params;
+    params["level"] = level_name;
+    request["params"] = params;
+    
+    worker_manager_->send_request(
+        request_id,
+        request.dump(),
+        [](const std::string&, const BatchResponse&) {},
+        [](const std::string&, const ErrorInfo&) {}
+    );
+}
+
 bool AICore::restart_all_workers() {
     if (worker_manager_) {
         worker_manager_->restart_worker();

@@ -291,7 +291,57 @@ class ConfigManager:
         if taskqueue_batch_size is not None:
             self._config["worker"]["taskqueue_batch_size"] = taskqueue_batch_size
             logger.debug(f"[config_manager.py::_merge_cpp_settings] C++ taskqueue_batch_size = {taskqueue_batch_size}")
-    
+        
+        # Merge Data Sources enable flags and Discogs credentials
+        data_sources = self._config.setdefault("data_sources", {})
+        mb_config = data_sources.get("musicbrainz", {})
+        discogs_config = data_sources.get("discogs", {})
+        ai_config = data_sources.get("ai", {})
+        
+        # Merge log level from C++ settings (0=DEBUG, 1=INFO, 2=WARNING, 3=ERROR)
+        if "log_level" in cpp_settings:
+            level_map = {0: "DEBUG", 1: "INFO", 2: "WARNING", 3: "ERROR"}
+            py_level = level_map.get(cpp_settings["log_level"], "INFO")
+            self._config.setdefault("logging", {})["level"] = py_level
+        
+        if "enable_musicbrainz" in cpp_settings:
+            mb_config["enabled"] = cpp_settings["enable_musicbrainz"]
+            data_sources["musicbrainz"] = mb_config
+        
+        if "enable_discogs" in cpp_settings:
+            discogs_config["enabled"] = cpp_settings["enable_discogs"]
+        
+        if "enable_ai" in cpp_settings:
+            ai_config["enabled"] = cpp_settings["enable_ai"]
+            data_sources["ai"] = ai_config
+        
+        discogs_key = cpp_settings.get("discogs_consumer_key", "")
+        if discogs_key:
+            discogs_config["consumer_key"] = discogs_key
+        
+        discogs_secret = cpp_settings.get("discogs_consumer_secret", "")
+        if discogs_secret:
+            discogs_config["consumer_secret"] = discogs_secret
+        
+        if discogs_config:
+            data_sources["discogs"] = discogs_config
+        
+        # Merge MusicBrainz tuning parameters
+        mb_field_map = {
+            "mb_timeout": "timeout",
+            "mb_retries": "retries",
+            "mb_page_size": "page_size",
+            "mb_max_pages": "max_pages",
+            "mb_score_threshold": "score_threshold",
+            "mb_score_margin": "score_margin",
+            "mb_rate_limit": "rate_limit_rpm",
+        }
+        for cpp_key, yaml_key in mb_field_map.items():
+            if cpp_key in cpp_settings:
+                mb_config[yaml_key] = cpp_settings[cpp_key]
+        if mb_config:
+            data_sources["musicbrainz"] = mb_config
+
     def _deep_update(self, base: dict, override: dict) -> None:
         """深度更新字典
         

@@ -91,6 +91,9 @@ struct PluginSettings {
     bool enable_discogs;                              ///< 启用 Discogs 数据源
     bool enable_ai;                                   ///< 启用 AI 数据源
     
+    std::string discogs_consumer_key;                 ///< Discogs Consumer Key
+    std::string discogs_consumer_secret;              ///< Discogs Consumer Secret
+    
     int mb_timeout;                                   ///< MusicBrainz HTTP 超时（秒）
     int mb_retries;                                   ///< MusicBrainz 重试次数
     int mb_page_size;                                 ///< MusicBrainz 每页结果数
@@ -128,6 +131,8 @@ struct PluginSettings {
         , enable_musicbrainz(true)
         , enable_discogs(false)
         , enable_ai(true)
+        , discogs_consumer_key("")
+        , discogs_consumer_secret("")
         , mb_timeout(30)
         , mb_retries(3)
         , mb_page_size(10)

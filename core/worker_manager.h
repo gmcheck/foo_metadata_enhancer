@@ -173,6 +173,17 @@ private:
     void stop_worker();
     
     /**
+     * @brief 启动Worker进程（不获取锁，调用者须持有 worker_mutex_）
+     * @return 启动成功返回true
+     */
+    bool start_worker_locked();
+    
+    /**
+     * @brief 停止Worker进程（不获取锁，调用者须持有 worker_mutex_）
+     */
+    void stop_worker_locked();
+    
+    /**
      * @brief 向管道写入消息
      * @param hPipe 管道句柄
      * @param message 消息内容
