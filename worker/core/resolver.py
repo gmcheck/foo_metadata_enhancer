@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 
 from data_sources.base import Candidate, QueryInput, DataSourceType
 from common.text_utils import clean_value
-from prompts import BATCH_RESOLVE_SYSTEM_PROMPT, BATCH_ENHANCED_SYSTEM_PROMPT
+from prompts import get_composer
 
 logger = logging.getLogger(__name__)
 
@@ -228,7 +228,7 @@ class AIResolver:
         Returns:
             List[Dict]: 消息列表
         """
-        system_prompt = BATCH_ENHANCED_SYSTEM_PROMPT if enhanced else BATCH_RESOLVE_SYSTEM_PROMPT
+        system_prompt = get_composer(self._config).build_stage1_system_prompt(enhanced=enhanced)
         
         tracks_data = []
         for i, (query, candidates) in enumerate(zip(queries, candidates_list)):

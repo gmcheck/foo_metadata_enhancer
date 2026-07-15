@@ -15,6 +15,8 @@ from .openrouter_provider import OpenRouterProvider
 from .ollama_provider import OllamaProvider
 from .zhipu_provider import ZhipuProvider
 from .gemini_provider import GeminiProvider
+from .deepseek_provider import DeepSeekProvider
+from .openai_provider import OpenAIProvider
 from .factory import AIProviderFactory, create_provider
 
 __all__ = [
@@ -22,10 +24,12 @@ __all__ = [
     "AIResponse",
     "ProviderConfig",
     "BaseAIProvider",
+    "OpenAIProvider",
     "OpenRouterProvider",
     "OllamaProvider",
     "ZhipuProvider",
     "GeminiProvider",
+    "DeepSeekProvider",
     "AIProviderFactory",
     "create_provider",
 ]

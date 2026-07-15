@@ -123,12 +123,20 @@ enum class V8MenuItemID {
     ROLLBACK_VERSION = 12,
 };
 
+// 前向声明：Stage2 启动函数，实现在 Stage2EnhanceCallback 定义之后
+static void launch_stage2_enhance_auto(metadb_handle_list tracks,
+                                        std::vector<TrackInput> inputs,
+                                        EnhancementOptions options);
+
 class Stage1ScrapeCallback : public threaded_process_callback {
 public:
-    Stage1ScrapeCallback(metadb_handle_list tracks, std::vector<TrackInput> inputs, ScrapingOptions options)
+    Stage1ScrapeCallback(metadb_handle_list tracks, std::vector<TrackInput> inputs, ScrapingOptions options,
+                         bool chain_to_stage2 = false, EnhancementOptions stage2_options = EnhancementOptions{})
         : m_tracks(tracks)
         , m_inputs(std::move(inputs))
-        , m_options(options) {}
+        , m_options(options)
+        , m_chain_to_stage2(chain_to_stage2)
+        , m_stage2_options(stage2_options) {}
     
     void on_init(HWND p_wnd) override {
         console::print("AI Metadata V8: Stage 1 scraping started...");
@@ -205,16 +213,19 @@ public:
         }
         
         std::vector<bool> selected(m_results.size(), true);
-        
+
         for (size_t i = 0; i < m_results.size(); ++i) {
             if (!m_results[i].success || m_results[i].scraped_fields.empty()) {
                 selected[i] = false;
             }
         }
-        
-        if (!DialogManager::ShowConfirmResultDialog(core_api::get_main_window(), m_results, selected, m_inputs)) {
-            popup_message::g_show("Scraping cancelled by user", "AI Metadata V8");
-            return;
+
+        // chain 模式跳过确认对话框，自动应用所有成功结果
+        if (!m_chain_to_stage2) {
+            if (!DialogManager::ShowConfirmResultDialog(core_api::get_main_window(), m_results, selected, m_inputs)) {
+                popup_message::g_show("Scraping cancelled by user", "AI Metadata V8");
+                return;
+            }
         }
         
         int applied = 0;
@@ -302,17 +313,60 @@ public:
             batch_update_metadata(modified_tracks, modified_infos);
         }
         
+        if (m_chain_to_stage2 && modified_tracks.get_count() > 0) {
+            // chain 模式：用已修改的 info 构建 stage2 输入，自动启动增强
+            std::vector<TrackInput> stage2_inputs;
+            for (size_t i = 0; i < modified_tracks.get_count(); ++i) {
+                file_info_impl info;
+                if (modified_tracks.get_item(i)->get_info(info)) {
+                    stage2_inputs.push_back(extract_track_input(modified_tracks.get_item(i)));
+                } else {
+                    // fallback: 用 modified_infos 中的数据
+                    const auto& fi = modified_infos[i];
+                    TrackInput input;
+                    const char* path = modified_tracks.get_item(i)->get_path();
+                    uint32_t subsong = modified_tracks.get_item(i)->get_subsong_index();
+                    t_filestats stats = modified_tracks.get_item(i)->get_filestats();
+                    input.track_id = CacheLayer::generate_track_uid(path ? path : "", subsong, stats.m_size);
+                    input.file_path = path ? path : "";
+                    input.subsong_index = subsong;
+                    input.title = fi.meta_get("TITLE", 0) ? fi.meta_get("TITLE", 0) : "";
+                    input.artist = fi.meta_get("ARTIST", 0) ? fi.meta_get("ARTIST", 0) : "";
+                    input.album = fi.meta_get("ALBUM", 0) ? fi.meta_get("ALBUM", 0) : "";
+                    input.album_artist = fi.meta_get("ALBUM ARTIST", 0) ? fi.meta_get("ALBUM ARTIST", 0) : "";
+                    const char* date_str = fi.meta_get("DATE", 0);
+                    if (date_str && strlen(date_str) > 0) {
+                        input.year = date_str;
+                        try { input.year_int = std::stoi(date_str); } catch (...) { input.year_int = 0; }
+                    }
+                    input.genre = fi.meta_get("GENRE", 0) ? fi.meta_get("GENRE", 0) : "";
+                    stage2_inputs.push_back(input);
+                }
+            }
+
+            if (!stage2_inputs.empty()) {
+                console::print("AI Metadata V8: Auto-chaining to Stage 2 Enhancement...");
+                launch_stage2_enhance_auto(modified_tracks, std::move(stage2_inputs), m_stage2_options);
+            }
+            return;
+        }
+
         pfc::string8 msg;
-        msg << "Stage 1 scraping complete: " << applied << "/" << m_results.size() << " tracks updated";
+        msg << "Scraping complete: " << applied << "/" << m_results.size() << " tracks updated";
+        if (m_chain_to_stage2) {
+            msg << "\n\nNo tracks to enhance (scraping produced no results).";
+        }
         popup_message::g_show(msg, "AI Metadata V8");
     }
-    
+
 private:
     metadb_handle_list m_tracks;
     std::vector<TrackInput> m_inputs;
     ScrapingOptions m_options;
     std::vector<TrackScrapingResult> m_results;
     std::string m_error_message;
+    bool m_chain_to_stage2 = false;
+    EnhancementOptions m_stage2_options;
 };
 
 class Stage2EnhanceCallback : public threaded_process_callback {
@@ -514,6 +568,17 @@ private:
     std::string m_error_message;
 };
 
+// 实现 chain 模式：启动 Stage2 增强流程
+static void launch_stage2_enhance_auto(metadb_handle_list tracks,
+                                        std::vector<TrackInput> inputs,
+                                        EnhancementOptions options) {
+    service_ptr_t<Stage2EnhanceCallback> cb = new service_impl_t<Stage2EnhanceCallback>(
+        tracks, std::move(inputs), options);
+    threaded_process::g_run_modeless(cb,
+        threaded_process::flag_show_progress | threaded_process::flag_show_abort,
+        core_api::get_main_window(), "Enhance Metadata (Auto)");
+}
+
 TrackInput extract_track_input(metadb_handle_ptr handle) {
     TrackInput input;
     
@@ -640,8 +705,10 @@ static const GUID guid_ai_metadata =
     { 0x11111111, 0x2222, 0x3333, { 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb } };
 static const GUID guid_stage1_scrape = 
     { 0x6f708192, 0x34a5, 0x6789, { 0x4a, 0x5b, 0x6c, 0x7d, 0x8e, 0x9f, 0xa0, 0xb1 } };
-static const GUID guid_stage2_enhance = 
+static const GUID guid_stage2_enhance =
     { 0x70819234, 0xa567, 0x89ab, { 0x5b, 0x6c, 0x7d, 0x8e, 0x9f, 0xa0, 0xb1, 0xc2 } };
+static const GUID guid_scrape_and_enhance =
+    { 0x81923456, 0x6789, 0xabcd, { 0x6c, 0x7d, 0x8e, 0x9f, 0xa0, 0xb1, 0xc2, 0xd3 } };
 static const GUID guid_rollback_initial = 
     { 0xb456789a, 0x3456, 0x789a, { 0xbc, 0xde, 0xf0, 0x12, 0x34, 0x56, 0x78, 0x9a } };
 static const GUID guid_cache_stats = 
@@ -665,6 +732,7 @@ public:
     
     void stage1_scrape(metadb_handle_list_cref p_data);
     void stage2_enhance(metadb_handle_list_cref p_data);
+    void scrape_and_enhance(metadb_handle_list_cref p_data);
     void rollback_to_initial(metadb_handle_list_cref p_data);
     void show_cache_stats();
     void clear_cache(metadb_handle_list_cref p_data);
@@ -739,23 +807,33 @@ contextmenu_item_node_root* V8MenuHandler::instantiate_item(unsigned p_index, me
     (void)p_index; (void)p_caller;
     auto root = new MenuNodeRoot();
     bool has_selection = p_data.get_count() > 0;
-    
-    root->add_child(new MenuNodeCommand("Stage 1: Scrape Metadata", guid_stage1_scrape, 
-        "Scrape basic metadata from MusicBrainz/Discogs/AI",
+
+    // 主操作组：刮削 + 增强
+    root->add_child(new MenuNodeCommand("Scrape Metadata", guid_stage1_scrape,
+        "Scrape basic metadata (title, artist, album, year, etc.) from MusicBrainz, Discogs, and AI sources.",
         [this](metadb_handle_list_cref data) { stage1_scrape(data); }, has_selection));
-    root->add_child(new MenuNodeCommand("Stage 2: Enhance Metadata", guid_stage2_enhance, 
-        "Enhance metadata: translate, classify genre, identify edition",
+    root->add_child(new MenuNodeCommand("Enhance Metadata", guid_stage2_enhance,
+        "Enhance metadata: translate titles to Chinese, classify genre, identify edition (remastered, live, etc.).",
         [this](metadb_handle_list_cref data) { stage2_enhance(data); }, has_selection));
+    root->add_child(new MenuNodeCommand("Scrape & Enhance (Auto)", guid_scrape_and_enhance,
+        "Run Scrape then Enhance automatically in one step. Skips intermediate confirmation dialogs.",
+        [this](metadb_handle_list_cref data) { scrape_and_enhance(data); }, has_selection));
+
     root->add_child(new MenuNodeSeparator());
-    root->add_child(new MenuNodeCommand("Rollback to Initial", guid_rollback_initial, 
-        "Rollback all selected tracks to their initial state",
+
+    // 回滚组
+    root->add_child(new MenuNodeCommand("Rollback to Initial", guid_rollback_initial,
+        "Restore selected tracks to their original metadata before any AI processing.",
         [this](metadb_handle_list_cref data) { rollback_to_initial(data); }, has_selection));
+
     root->add_child(new MenuNodeSeparator());
-    root->add_child(new MenuNodeCommand("Cache Statistics", guid_cache_stats, 
-        "Show cache statistics and hit rate",
+
+    // 工具组
+    root->add_child(new MenuNodeCommand("Cache Statistics", guid_cache_stats,
+        "Show cache statistics: total entries, hit rate, database size, API calls saved.",
         [this](metadb_handle_list_cref data) { (void)data; show_cache_stats(); }, true));
-    root->add_child(new MenuNodeCommand("Clear Cache", guid_clear_cache, 
-        "Clear cached metadata for selected tracks or all",
+    root->add_child(new MenuNodeCommand("Clear Cache", guid_clear_cache,
+        "Clear cached metadata for selected tracks or the entire cache.",
         [this](metadb_handle_list_cref data) { clear_cache(data); }, true));
     return root;
 }
@@ -897,6 +975,107 @@ void V8MenuHandler::stage2_enhance(metadb_handle_list_cref p_data) {
     service_ptr_t<Stage2EnhanceCallback> callback = new service_impl_t<Stage2EnhanceCallback>(p_data, std::move(inputs), options);
     threaded_process::g_run_modeless(callback, threaded_process::flag_show_progress | threaded_process::flag_show_abort,
         core_api::get_main_window(), "Stage 2: Enhance Metadata");
+}
+
+void V8MenuHandler::scrape_and_enhance(metadb_handle_list_cref p_data) {
+    Logger::instance().info("[V8MenuHandler] scrape_and_enhance: CALLED, track count = " + std::to_string(p_data.get_count()));
+    console::print("AI Metadata V8: scrape_and_enhance (auto chain) called");
+
+    if (!ensure_ai_core_initialized()) {
+        Logger::instance().error("[V8MenuHandler] scrape_and_enhance: ensure_ai_core_initialized FAILED");
+        popup_message::g_show("Failed to initialize AI core", "AI Metadata V8");
+        return;
+    }
+
+    // 检查必填字段（同 stage1_scrape）
+    std::vector<MissingFieldInfo> missing;
+    for (size_t i = 0; i < p_data.get_count(); ++i) {
+        file_info_impl info;
+        if (p_data.get_item(i)->get_info(info)) {
+            const char* title = info.meta_get("TITLE", 0);
+            const char* artist = info.meta_get("ARTIST", 0);
+            if (!title || strlen(title) == 0 || !artist || strlen(artist) == 0) {
+                MissingFieldInfo mfi;
+                const char* path = p_data.get_item(i)->get_path();
+                mfi.track_id = path ? path : "";
+                if (!title || strlen(title) == 0) mfi.missing_fields.push_back("TITLE");
+                if (!artist || strlen(artist) == 0) mfi.missing_fields.push_back("ARTIST");
+                missing.push_back(mfi);
+            }
+        }
+    }
+    if (!missing.empty()) {
+        pfc::string8 msg;
+        msg << "Cannot scrape: " << missing.size() << " track(s) missing required fields:\n\n";
+        for (size_t i = 0; i < missing.size() && i < 5; ++i) {
+            msg << missing[i].track_id.c_str() << ": missing ";
+            for (size_t j = 0; j < missing[i].missing_fields.size(); ++j) {
+                if (j > 0) msg << ", ";
+                msg << missing[i].missing_fields[j].c_str();
+            }
+            msg << "\n";
+        }
+        if (missing.size() > 5) msg << "... and " << (missing.size() - 5) << " more";
+        popup_message::g_show(msg, "AI Metadata - Missing Fields");
+        return;
+    }
+
+    // 刮削选项对话框（让用户选择数据源）
+    ScrapingOptions options;
+    options.enable_musicbrainz = SettingsManager::instance().settings().enable_musicbrainz;
+    options.enable_discogs = SettingsManager::instance().settings().enable_discogs;
+    options.enable_ai = SettingsManager::instance().settings().enable_ai;
+    if (!DialogManager::ShowScrapingOptionsDialog(core_api::get_main_window(), options)) return;
+
+    // 增强选项对话框（让用户选择翻译等）
+    EnhancementOptions stage2_options;
+    if (!DialogManager::ShowEnhancementOptionsDialog(core_api::get_main_window(), stage2_options)) return;
+
+    // 构建 stage1 输入
+    std::vector<TrackInput> inputs;
+    for (size_t i = 0; i < p_data.get_count(); ++i) {
+        file_info_impl info;
+        if (p_data.get_item(i)->get_info(info)) {
+            TrackInput input;
+            const char* path = p_data.get_item(i)->get_path();
+            uint32_t subsong = p_data.get_item(i)->get_subsong_index();
+            t_filestats stats = p_data.get_item(i)->get_filestats();
+            uint64_t file_size = stats.m_size;
+            input.track_id = CacheLayer::generate_track_uid(path ? path : "", subsong, file_size);
+            input.file_path = path ? path : "";
+            input.subsong_index = subsong;
+            input.title = info.meta_get("TITLE", 0) ? info.meta_get("TITLE", 0) : "";
+            input.artist = info.meta_get("ARTIST", 0) ? info.meta_get("ARTIST", 0) : "";
+            input.album = info.meta_get("ALBUM", 0) ? info.meta_get("ALBUM", 0) : "";
+            input.album_artist = info.meta_get("ALBUM ARTIST", 0) ? info.meta_get("ALBUM ARTIST", 0) : "";
+            const char* date_str = info.meta_get("DATE", 0);
+            if (date_str && strlen(date_str) > 0) {
+                input.year = date_str;
+                try { input.year_int = std::stoi(date_str); } catch (...) { input.year_int = 0; }
+            }
+            const char* track_str = info.meta_get("TRACKNUMBER", 0);
+            if (track_str && strlen(track_str) > 0) {
+                try { input.track_number = std::stoi(track_str); } catch (...) { input.track_number = 0; }
+            }
+            const char* disc_str = info.meta_get("DISCNUMBER", 0);
+            if (disc_str && strlen(disc_str) > 0) {
+                try { input.disc_number = std::stoi(disc_str); } catch (...) { input.disc_number = 0; }
+            }
+            input.genre = info.meta_get("GENRE", 0) ? info.meta_get("GENRE", 0) : "";
+            input.composer = info.meta_get("COMPOSER", 0) ? info.meta_get("COMPOSER", 0) : "";
+            input.lyricist = info.meta_get("LYRICIST", 0) ? info.meta_get("LYRICIST", 0) : "";
+            input.conductor = info.meta_get("CONDUCTOR", 0) ? info.meta_get("CONDUCTOR", 0) : "";
+            input.performer = info.meta_get("PERFORMER", 0) ? info.meta_get("PERFORMER", 0) : "";
+            input.label = info.meta_get("LABEL", 0) ? info.meta_get("LABEL", 0) : "";
+            inputs.push_back(input);
+        }
+    }
+
+    // 启动 stage1，chain_to_stage2=true，自动触发 stage2
+    service_ptr_t<Stage1ScrapeCallback> callback = new service_impl_t<Stage1ScrapeCallback>(
+        p_data, std::move(inputs), options, true, stage2_options);
+    threaded_process::g_run_modeless(callback, threaded_process::flag_show_progress | threaded_process::flag_show_abort,
+        core_api::get_main_window(), "Scrape & Enhance (Auto) - Stage 1");
 }
 
 void V8MenuHandler::rollback_to_initial(metadb_handle_list_cref p_data) {

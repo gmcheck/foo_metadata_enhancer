@@ -7,12 +7,15 @@ A foobar2000 plugin that uses AI to automatically analyze, scrape, and enhance m
 
 ## Features
 
-- **Stage 1: Metadata Scraping** - Automatically fetches metadata from MusicBrainz, Discogs, and AI
-- **Stage 2: Enhancement** - AI-powered translation, genre classification, and edition identification
+- **Metadata Scraping** - Automatically fetches metadata from MusicBrainz, Discogs, and AI
+- **Metadata Enhancement** - AI-powered translation, genre classification, and edition identification
+- **One-Click Processing** - Run Scrape + Enhance in a single step with auto-chaining
 - **Multi-source Support** - MusicBrainz (authoritative) → Discogs (supplemental) → AI (fallback)
 - **Smart Caching** - SQLite-based cache to reduce redundant API calls
 - **Backup & Rollback** - Automatic backup before modifications with rollback support
-- **Multiple AI Providers** - Supports OpenRouter, Zhipu AI, Google Gemini, and Ollama (local)
+- **Multiple AI Providers** - Supports OpenRouter, Zhipu AI, Google Gemini, DeepSeek, and Ollama (local)
+- **Configurable Translation Style** - Three translation strategies: official / literal / semantic
+- **UTF-8 Support** - Full Chinese input support in custom hints and advanced instructions
 
 ## Requirements
 
@@ -37,7 +40,8 @@ A foobar2000 plugin that uses AI to automatically analyze, scrape, and enhance m
 ## Quick Start
 
 1. Select one or more tracks in foobar2000
-2. Right-click → **AI Metadata** → **Stage 1: Scrape Metadata**
+2. Right-click → **AI Metadata** → **Scrape & Enhance (Auto)** for one-step processing
+   - Or run **Scrape Metadata** and **Enhance Metadata** separately for more control
 3. Review the results and select fields to write
 4. Click **Apply Selected**
 
@@ -45,8 +49,9 @@ A foobar2000 plugin that uses AI to automatically analyze, scrape, and enhance m
 
 | Command | Description |
 |---------|-------------|
-| Stage 1: Scrape Metadata | Fetch basic metadata from MusicBrainz/Discogs/AI |
-| Stage 2: Enhance Metadata | AI-powered translation, genre classification, edition identification |
+| Scrape Metadata | Fetch basic metadata from MusicBrainz/Discogs/AI |
+| Enhance Metadata | AI-powered translation, genre classification, edition identification |
+| Scrape & Enhance (Auto) | Run Scrape then Enhance automatically in one step |
 | Rollback to Initial | Restore tracks to original state before AI processing |
 | Cache Statistics | View cache hit rate and database size |
 | Clear Cache | Clear cached metadata for selected tracks or all |
@@ -90,7 +95,7 @@ Access settings via: **File** → **Preferences** → **AI Metadata**
 
 ## Supported Tags
 
-### Stage 1 Output
+### Scrape Output
 
 | Tag | Description |
 |-----|-------------|
@@ -104,7 +109,7 @@ Access settings via: **File** → **Preferences** → **AI Metadata**
 | LYRICIST | Lyricist |
 | LABEL | Record label |
 
-### Stage 2 Output
+### Enhance Output
 
 | Tag | Description |
 |-----|-------------|

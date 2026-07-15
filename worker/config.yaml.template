@@ -24,6 +24,7 @@ providers:
     - "zhipu"
     - "gemini"
     - "openrouter"
+    - "deepseek"
     - "ollama"
   
   openrouter:
@@ -74,7 +75,20 @@ providers:
         priority: 3
     extra_params:
       temperature: 0.3
-  
+
+  deepseek:
+    # DeepSeek API key (get from https://platform.deepseek.com/)
+    api_key: ""
+    # DeepSeek API base URL (OpenAI-compatible)
+    base_url: "https://api.deepseek.com/v1/chat/completions"
+    models:
+      - name: "deepseek-chat"
+        priority: 1
+      - name: "deepseek-reasoner"
+        priority: 2
+    extra_params:
+      temperature: 0.3
+
   ollama:
     # Enable Ollama local model
     enabled: false

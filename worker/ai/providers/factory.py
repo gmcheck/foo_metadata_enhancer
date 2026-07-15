@@ -13,6 +13,7 @@ from .openrouter_provider import OpenRouterProvider
 from .ollama_provider import OllamaProvider
 from .zhipu_provider import ZhipuProvider
 from .gemini_provider import GeminiProvider
+from .deepseek_provider import DeepSeekProvider
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,7 @@ class AIProviderFactory:
         ProviderType.OLLAMA: OllamaProvider,
         ProviderType.ZHIPU: ZhipuProvider,
         ProviderType.GEMINI: GeminiProvider,
+        ProviderType.DEEPSEEK: DeepSeekProvider,
     }
     
     _instances: Dict[str, BaseAIProvider] = {}
@@ -181,8 +183,8 @@ class AIProviderFactory:
         providers_config = config.get("providers", {})
         
         default_provider = providers_config.get("default", "")
-        priority_order = providers_config.get("priority_order", 
-                                              ["openrouter", "zhipu", "gemini", "ollama"])
+        priority_order = providers_config.get("priority_order",
+                                              ["openrouter", "zhipu", "gemini", "deepseek", "ollama"])
         
         if default_provider:
             try:

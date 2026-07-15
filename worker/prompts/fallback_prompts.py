@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Fallback Prompts
-AI inference prompts for last-resort metadata inference
+Fallback Prompts（薄包装层）
 
-Fallback 职责：
-1. 当所有数据源查询失败时，使用 AI 推断元数据
-2. 作为最后的降级手段
+原硬编码 Prompt 已迁移到 PromptComposer 分层组装。
+本文件保留旧常量名与函数作为向后兼容别名。
+
+build_inference_prompt() 构建 user message 内容（含曲目信息），保持原实现不变。
+INFERENCE_SYSTEM_PROMPT 走 Composer（默认 config）。
 """
 
-from .base import format_json_output_requirements
+from .composer import _build_default_fallback_prompt
 
 
 def build_inference_prompt(
@@ -19,17 +20,19 @@ def build_inference_prompt(
     duration: int = None,
     previous_errors: list = None
 ) -> str:
-    """构建 AI 推断提示词
-    
+    """构建 AI 推断 user message（曲目信息部分）
+
+    此函数构建的是 user message 内容（非 system prompt），保持原实现不变。
+
     Args:
         title: 歌曲标题
         artist: 艺术家
         album: 专辑
         duration: 时长（秒）
         previous_errors: 之前的错误列表
-    
+
     Returns:
-        str: 完整的提示词
+        str: 完整的 user message 提示词
     """
     prompt_parts = [
         "You are a music metadata expert. Based on the limited information provided,",
@@ -41,13 +44,13 @@ def build_inference_prompt(
         f"- Album: {album or 'Unknown'}",
         f"- Duration: {duration} seconds" if duration else "",
     ]
-    
+
     if previous_errors:
         prompt_parts.append("")
         prompt_parts.append("Previous search attempts failed:")
         for error in previous_errors[:3]:
             prompt_parts.append(f"- {error}")
-    
+
     prompt_parts.extend([
         "",
         "Please provide your best inference in the following JSON format:",
@@ -70,30 +73,10 @@ def build_inference_prompt(
         "- Leave fields empty if you cannot infer them",
         "- Respond ONLY with the JSON object, no additional text"
     ])
-    
+
     return "\n".join(prompt_parts)
 
 
-INFERENCE_SYSTEM_PROMPT = """You are a music metadata expert. Based on the limited information provided, infer the most likely metadata for this track.
-
-""" + format_json_output_requirements() + """
-
-Return JSON format:
-{
-    "title": "inferred title",
-    "artist": "inferred artist",
-    "album": "inferred album",
-    "year": "inferred year",
-    "genre": "inferred genre",
-    "composer": "inferred composer",
-    "label": "inferred record label",
-    "country": "inferred country of origin",
-    "confidence": 0.0-1.0,
-    "reasoning": "brief explanation of your inference"
-}
-
-Guidelines:
-- Only provide information you can reasonably infer
-- Set confidence to 0.0-0.5 for uncertain inferences
-- Leave fields empty if you cannot infer them
-- This is a fallback when all data sources failed"""
+# 向后兼容别名：模块加载时用默认 config 构建一次，内容固定
+# 如需动态 Prompt，请使用 get_composer(config).build_fallback_system_prompt()
+INFERENCE_SYSTEM_PROMPT = _build_default_fallback_prompt()

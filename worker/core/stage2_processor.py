@@ -16,7 +16,7 @@ from typing import Dict, Any, Optional, List
 from data_sources.base import EnhancementOptions
 from abort_checker import is_aborted
 from common.text_utils import clean_value
-from prompts import BATCH_ENHANCE_SYSTEM_PROMPT
+from prompts import get_composer
 
 logger = logging.getLogger(__name__)
 
@@ -273,7 +273,7 @@ Remember:
 - translation_confidence: 0.0-1.0, use 0.0 if no translation needed"""
 
         return [
-            {"role": "system", "content": BATCH_ENHANCE_SYSTEM_PROMPT},
+            {"role": "system", "content": get_composer(self._config).build_stage2_system_prompt()},
             {"role": "user", "content": user_content}
         ]
     

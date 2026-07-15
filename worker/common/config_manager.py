@@ -217,7 +217,7 @@ class ConfigManager:
         self._config = {
             "providers": {
                 "default": "",
-                "priority_order": ["openrouter", "zhipu", "gemini", "ollama"]
+                "priority_order": ["openrouter", "zhipu", "gemini", "deepseek", "ollama"]
             },
             "worker": {
                 "pool_size": 3,
@@ -232,6 +232,9 @@ class ConfigManager:
                 "level": "INFO",
                 "max_file_size": 10485760,
                 "backup_count": 5
+            },
+            "prompts": {
+                "user_prefs": {}
             }
         }
         
@@ -342,6 +345,16 @@ class ConfigManager:
         if mb_config:
             data_sources["musicbrainz"] = mb_config
 
+        # Merge Prompt user preferences (Layer 3)
+        # C++ settings.json 中的 prompts.user_prefs 段合并到 config
+        cpp_user_prefs = cpp_settings.get("prompts", {}).get("user_prefs", {})
+        if cpp_user_prefs:
+            self._config.setdefault("prompts", {}).setdefault("user_prefs", {})
+            self._config["prompts"]["user_prefs"].update(cpp_user_prefs)
+            logger.debug(f"[config_manager.py::_merge_cpp_settings] Merged prompts.user_prefs: "
+                         f"translation_style={cpp_user_prefs.get('translation_style', 'N/A')}, "
+                         f"genre_language={cpp_user_prefs.get('genre_language', 'N/A')}")
+
     def _deep_update(self, base: dict, override: dict) -> None:
         """深度更新字典
         
@@ -405,11 +418,38 @@ class ConfigManager:
     
     def get_providers_config(self) -> Dict[str, Any]:
         """获取提供商配置
-        
+
         Returns:
             Dict[str, Any]: 提供商配置字典
         """
         return self._config.get("providers", {})
+
+    def get_prompts_dir(self) -> Path:
+        """获取 prompts 目录路径（Layer 2 领域知识 MD 文件存放位置）
+
+        目录位于 <foobar2000 profile>/foo_metadata_enhancer/prompts/，
+        与 settings.json 同级。首次调用时自动创建目录。
+
+        Returns:
+            Path: prompts 目录路径
+        """
+        profile_dir = _find_foobar_profile()
+        if profile_dir is None:
+            # 未找到 profile 目录，使用预期路径兜底
+            expected = _get_expected_settings_path()
+            if expected is not None:
+                prompts_dir = expected.parent / "prompts"
+            else:
+                prompts_dir = Path.cwd() / "prompts"
+        else:
+            prompts_dir = profile_dir / "prompts"
+
+        try:
+            prompts_dir.mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            logger.warning(f"[config_manager.py::get_prompts_dir] Failed to create prompts dir {prompts_dir}: {e}")
+
+        return prompts_dir
 
 
 def setup_logging(config: Optional[Dict[str, Any]] = None) -> logging.Logger:

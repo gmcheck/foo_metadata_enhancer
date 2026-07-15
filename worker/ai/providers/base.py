@@ -25,11 +25,15 @@ class ProviderType(Enum):
         OLLAMA: Ollama本地提供商
         ZHIPU: 智谱AI提供商
         GEMINI: Google Gemini提供商
+        DEEPSEEK: DeepSeek提供商
+        OPENAI: OpenAI兼容基类
     """
     OPENROUTER = "openrouter"
     OLLAMA = "ollama"
     ZHIPU = "zhipu"
     GEMINI = "gemini"
+    DEEPSEEK = "deepseek"
+    OPENAI = "openai"
 
 
 @dataclass

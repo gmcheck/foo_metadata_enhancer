@@ -17,6 +17,7 @@ from data_sources.base import (
     Candidate,
 )
 from common.text_utils import clean_value
+from prompts.composer import get_composer, _build_default_ai_scrape_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -31,28 +32,9 @@ class AIAdapter(DataSourceAdapter):
     - Ollama (本地)
     """
     
-    SCRAPE_SYSTEM_PROMPT = """You are a music metadata expert. Given a song title and artist, 
-provide accurate metadata information. Return all available fields with confidence scores.
-
-IMPORTANT: Return ONLY valid JSON, no additional text.
-
-Return JSON format:
-{
-    "title": {"value": "...", "confidence": 0.95},
-    "artist": {"value": "...", "confidence": 0.98},
-    "album": {"value": "...", "confidence": 0.90},
-    "year": {"value": "...", "confidence": 0.85},
-    "composer": {"value": "...", "confidence": 0.80},
-    "lyricist": {"value": "...", "confidence": 0.75},
-    "label": {"value": "...", "confidence": 0.70}
-}
-
-Guidelines:
-- confidence: 0.0-1.0, where 1.0 means absolutely certain
-- Only include fields you can confidently identify
-- If uncertain about a field, omit it or use low confidence
-- For classical music, composer is very important
-- For pop/rock, label and year are often available"""
+    # 向后兼容别名：模块加载时用默认 config 构建一次
+    # 运行时使用 get_composer(self._config).build_ai_scrape_system_prompt() 获取动态 Prompt
+    SCRAPE_SYSTEM_PROMPT = _build_default_ai_scrape_prompt()
     
     def __init__(self, config: Dict[str, Any]):
         """初始化 AI 适配器
@@ -147,7 +129,7 @@ Return JSON with each field containing 'value' and 'confidence' (0.0-1.0).
 Only include fields you can confidently identify."""
 
         return [
-            {"role": "system", "content": self.SCRAPE_SYSTEM_PROMPT},
+            {"role": "system", "content": get_composer(self._config).build_ai_scrape_system_prompt()},
             {"role": "user", "content": user_content}
         ]
     
@@ -235,7 +217,7 @@ Only include fields you can confidently identify."""
         """切换 AI 提供商
         
         Args:
-            provider_type: 'openrouter', 'zhipu', 'gemini', 'ollama'
+            provider_type: 'openrouter', 'zhipu', 'gemini', 'ollama', 'deepseek'
         
         Returns:
             bool: 切换成功返回 True
@@ -254,7 +236,7 @@ Only include fields you can confidently identify."""
             from ai.providers import AIProviderFactory
             return AIProviderFactory.get_available_providers()
         except ImportError:
-            return ["openrouter", "zhipu", "gemini", "ollama"]
+            return ["openrouter", "zhipu", "gemini", "deepseek", "ollama"]
     
     def get_provider_info(self) -> Dict[str, Any]:
         """获取当前提供商信息

@@ -16,7 +16,8 @@ enum class AIProvider {
     OpenRouter = 0, ///< OpenRouter提供商
     Zhipu = 1,      ///< 智谱AI提供商
     Gemini = 2,     ///< Google Gemini提供商
-    Ollama = 3      ///< Ollama本地提供商
+    Ollama = 3,     ///< Ollama本地提供商
+    DeepSeek = 4    ///< DeepSeek提供商
 };
 
 /**
@@ -30,6 +31,7 @@ inline const char* provider_to_string(AIProvider p) {
         case AIProvider::Zhipu: return "zhipu";
         case AIProvider::Gemini: return "gemini";
         case AIProvider::Ollama: return "ollama";
+        case AIProvider::DeepSeek: return "deepseek";
         default: return "openrouter";
     }
 }
@@ -43,6 +45,7 @@ inline AIProvider string_to_provider(const std::string& s) {
     if (s == "zhipu") return AIProvider::Zhipu;
     if (s == "gemini") return AIProvider::Gemini;
     if (s == "ollama") return AIProvider::Ollama;
+    if (s == "deepseek") return AIProvider::DeepSeek;
     return AIProvider::OpenRouter;
 }
 
@@ -52,6 +55,30 @@ inline AIProvider string_to_provider(const std::string& s) {
 struct ModelInfo {
     std::string name;  ///< 模型名称
     int priority;      ///< 优先级
+};
+
+/**
+ * @brief Prompt 用户偏好结构体（Layer 3）
+ *
+ * 序列化到 settings.json 的 prompts.user_prefs 段，
+ * 经 ConfigManager._merge_cpp_settings() 合并到 Python config。
+ * 字段含义与 worker/prompts/user_prefs.py::PromptPrefs 一一对应。
+ */
+struct PromptPrefs {
+    /// 翻译风格：official / literal / semantic
+    std::string translation_style = "official";
+
+    /// 流派返回语言：english / chinese / bilingual
+    std::string genre_language = "english";
+
+    bool keep_original_when_uncertain = true;  ///< 不确定时保留原文
+    double min_translation_confidence = 0.5;   ///< 最低翻译置信度阈值
+
+    /// 翻译平台优先级（逗号分隔：netease,qq,spotify,applemusic,melon,oricon）
+    std::string translation_platform_priority = "netease,qq,spotify,applemusic";
+
+    std::string custom_translation_hints;  ///< 自定义翻译 hints（多行，每行 "原文名 = 译名"）
+    std::string custom_instructions;       ///< 自定义附加指令（多行自由文本）
 };
 
 /**
@@ -101,10 +128,12 @@ struct PluginSettings {
     int mb_score_threshold;                           ///< MusicBrainz 评分阈值
     int mb_score_margin;                              ///< MusicBrainz 评分差距阈值
     int mb_rate_limit;                                ///< MusicBrainz 速率限制（请求/分钟）
-    
+
     ai_metadata::constants::LogLevel log_level;       ///< 日志级别
     int max_log_file_size_mb;                         ///< 最大日志文件大小（MB）
-    
+
+    PromptPrefs prompt_prefs;                         ///< Prompt 用户偏好（Layer 3）
+
     bool menu_analyze_selected;                       ///< 菜单项：分析选中
     bool menu_analyze_all;                            ///< 菜单项：分析全部
     bool menu_cache_stats;                            ///< 菜单项：缓存统计
@@ -152,6 +181,7 @@ struct PluginSettings {
         provider_configs[AIProvider::Zhipu] = ProviderConfig{};
         provider_configs[AIProvider::Gemini] = ProviderConfig{};
         provider_configs[AIProvider::Ollama] = ProviderConfig{};
+        provider_configs[AIProvider::DeepSeek] = ProviderConfig{};
     }
     
     /**
@@ -304,6 +334,7 @@ private:
     void on_clear_cache();
     void on_restart_workers();
     void on_browse_python();
+    void on_export_templates();
     void on_changed();
     void update_worker_status_display();
     
@@ -348,7 +379,20 @@ public:
 class AIPreferencePageAdvanced : public preferences_page_v3 {
 public:
     static const GUID g_guid;
-    
+
+    const char* get_name() override;
+    GUID get_guid() override;
+    GUID get_parent_guid() override;
+    preferences_page_instance::ptr instantiate(HWND parent, preferences_page_callback::ptr callback) override;
+};
+
+/**
+ * @brief AI Prompt 偏好设置页面（Layer 3 用户偏好 UI 入口）
+ */
+class AIPreferencePagePrompts : public preferences_page_v3 {
+public:
+    static const GUID g_guid;
+
     const char* get_name() override;
     GUID get_guid() override;
     GUID get_parent_guid() override;

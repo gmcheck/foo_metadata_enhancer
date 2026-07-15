@@ -144,6 +144,36 @@ BEGIN
     AUTOCHECKBOX    "Show Progress", IDC_SHOW_PROGRESS_PREF, 200, 129, 70, 10
 END
 
+IDD_PREF_PROMPTS DIALOGEX 0, 0, 320, 300
+STYLE DS_SETFONT | DS_FIXEDSYS | WS_CHILD | WS_VISIBLE
+FONT 8, "MS Shell Dlg"
+BEGIN
+    GROUPBOX        "Translation", IDC_GROUP_PROMPTS, 7, 7, 306, 130
+    LTEXT           "Style:", IDC_TRANSLATION_STYLE_LABEL, 14, 20, 25, 8
+    COMBOBOX        IDC_TRANSLATION_STYLE, 42, 18, 80, 100, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "Genre Language:", IDC_GENRE_LANGUAGE_LABEL, 135, 20, 55, 8
+    COMBOBOX        IDC_GENRE_LANGUAGE, 193, 18, 60, 100, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    AUTOCHECKBOX    "Keep original when uncertain", IDC_KEEP_ORIGINAL, 14, 38, 130, 10
+    LTEXT           "Min Confidence:", IDC_MIN_CONFIDENCE_LABEL, 14, 54, 60, 8
+    EDITTEXT        IDC_MIN_CONFIDENCE, 75, 52, 30, 12, ES_NUMBER
+    LTEXT           "(0-100, e.g. 50 = 0.50)", IDC_STATIC, 110, 54, 90, 8
+    LTEXT           "Platform Priority:", IDC_PLATFORM_PRIORITY_LABEL, 14, 70, 60, 8
+    EDITTEXT        IDC_PLATFORM_PRIORITY, 75, 68, 230, 12, ES_AUTOHSCROLL
+    LTEXT           "(comma-separated: netease,qq,spotify,applemusic,melon,oricon)", IDC_STATIC, 14, 82, 290, 8
+    LTEXT           "Custom Hints (one per line, 'Original = Translation'):", IDC_CUSTOM_HINTS_LABEL, 14, 96, 290, 8
+    EDITTEXT        IDC_CUSTOM_HINTS, 14, 106, 290, 22, ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL
+    LTEXT           "Force specific translations. e.g. 'The Beatles = Bei Tou Shi'", IDC_STATIC, 14, 130, 290, 8
+
+    GROUPBOX        "Advanced", IDC_STATIC, 7, 143, 306, 95
+    LTEXT           "Additional Instructions (appended to system prompt):", IDC_CUSTOM_INSTRUCTIONS_LABEL, 14, 156, 290, 8
+    EDITTEXT        IDC_CUSTOM_INSTRUCTIONS, 14, 166, 290, 50, ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL
+    LTEXT           "Free-form text appended to the AI system prompt. Use it to add project-specific rules, e.g. 'Prefer Taiwan translation terms.' or 'Treat soundtrack albums as classical genre.'", IDC_STATIC, 14, 219, 290, 16
+
+    PUSHBUTTON      "Export Default Prompt Templates", IDC_EXPORT_TEMPLATES_BTN, 7, 240, 160, 14
+    LTEXT           "Templates are copied to profile/foo_metadata_enhancer/prompts/", IDC_STATIC, 7, 258, 290, 8
+    LTEXT           "Edit those .md files to customize domain knowledge (Layer 2).", IDC_STATIC, 7, 268, 290, 8
+END
+
 IDD_BATCH_SETTINGS DIALOGEX 0, 0, 260, 180
 STYLE DS_SETFONT | DS_MODALFRAME | DS_FIXEDSYS | WS_POPUP | WS_CAPTION | WS_SYSMENU
 CAPTION "Batch Settings"

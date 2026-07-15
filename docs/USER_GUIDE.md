@@ -32,16 +32,23 @@ foo_metadata_enhancer 是一个 foobar2000 插件，利用人工智能技术自�
 
 | 功能 | 描述 |
 |------|------|
-| Stage 1: 刮削 | 从 MusicBrainz、Discogs、AI 获取基础元数据 |
-| Stage 2: 增强 | AI 驱动的翻译、流派分类、版本识别 |
+| 刮削元数据 | 从 MusicBrainz、Discogs、AI 获取基础元数据 |
+| 增强元数据 | AI 驱动的翻译、流派分类、版本识别 |
+| 一键处理 | 自动串联刮削 + 增强，跳过中间确认 |
 | 回滚 | 恢复到处理前的原始状态 |
 | 缓存管理 | 查看和清理缓存数据 |
+| 翻译风格配置 | 三种翻译策略：官方译名优先 / 字面直译 / 意译 |
 
 ### 1.3 工作流程
 
 ```
 选择曲目 → 右键菜单 → AI Metadata → 选择操作 → 预览结果 → 确认写入
 ```
+
+**两种工作模式**：
+
+- **分步模式**：先运行 "Scrape Metadata" 获取基础信息并确认，再运行 "Enhance Metadata" 做翻译增强。适合需要人工审核刮削结果的用户。
+- **一键模式**：直接运行 "Scrape & Enhance (Auto)"，插件自动完成刮削后立即启动增强，中间不弹确认框，仅在增强完成后弹一次确认框。适合批量处理。
 
 ---
 
@@ -164,12 +171,15 @@ python --version
 
 #### 步骤 3：选择操作
 
-- **Stage 1: Scrape Metadata** - 获取基础元数据
-- **Stage 2: Enhance Metadata** - AI 增强处理
+- **Scrape Metadata** - 获取基础元数据（分步模式，处理后需确认）
+- **Enhance Metadata** - AI 增强处理（翻译/流派/版本）
+- **Scrape & Enhance (Auto)** - 一键模式，自动串联两步，中间不弹确认框
 
 #### 步骤 4：预览和确认
 
 处理完成后，预览对话框会显示所有获取到的元数据，选择要写入的字段和曲目，点击 **Apply Selected**。
+
+> **一键模式提示**：Scrape & Enhance (Auto) 仅在 Enhance 阶段结束时弹一次确认框，Scrape 阶段的所有成功结果会自动应用。
 
 ---
 
@@ -177,23 +187,36 @@ python --version
 
 ### 5.1 AI Metadata 右键菜单
 
-右键点击选中的曲目，在菜单中找到 **AI Metadata**，包含以下子菜单：
+右键点击选中的曲目，在菜单中找到 **AI Metadata**，菜单按功能分为三组（用分隔线隔开）：
+
+**主操作组**：
 
 | 菜单项 | 功能说明 |
 |--------|----------|
-| **Stage 1: Scrape Metadata** | 从 MusicBrainz/Discogs/AI 获取基础元数据 |
-| **Stage 2: Enhance Metadata** | AI 增强处理（翻译、流派分类、版本识别） |
+| **Scrape Metadata** | 从 MusicBrainz/Discogs/AI 获取基础元数据 |
+| **Enhance Metadata** | AI 增强处理（翻译、流派分类、版本识别） |
+| **Scrape & Enhance (Auto)** | 一键模式：自动串联刮削 + 增强，跳过中间确认 |
+
+**回滚组**：
+
+| 菜单项 | 功能说明 |
+|--------|----------|
 | **Rollback to Initial** | 回滚到处理前的原始状态 |
+
+**工具组**：
+
+| 菜单项 | 功能说明 |
+|--------|----------|
 | **Cache Statistics** | 查看缓存统计信息 |
 | **Clear Cache** | 清除缓存数据 |
 
 ---
 
-### 5.2 Stage 1: Scrape Metadata 详解
+### 5.2 Scrape Metadata 详解
 
 #### 5.2.1 功能说明
 
-Stage 1 从多个在线数据源获取基础元数据，按照优先级顺序查询：
+Scrape Metadata 从多个在线数据源获取基础元数据，按照优先级顺序查询：
 
 ```
 MusicBrainz (优先级最高) → Discogs (补充) → AI (兜底)
@@ -267,11 +290,11 @@ MusicBrainz (优先级最高) → Discogs (补充) → AI (兜底)
 
 ---
 
-### 5.3 Stage 2: Enhance Metadata 详解
+### 5.3 Enhance Metadata 详解
 
 #### 5.3.1 功能说明
 
-Stage 2 使用 AI 对已有元数据进行增强处理：
+Enhance Metadata 使用 AI 对已有元数据进行增强处理：
 
 - **翻译**：将标题、专辑、艺术家翻译为中文
 - **流派分类**：AI 分析并分类音乐流派
@@ -312,21 +335,85 @@ Select which fields to write in the confirmation dialog.
 | ALBUM_ZH | 中文专辑名 | "百惠传" |
 | ARTIST_ZH | 中文艺术家名 | "山口百惠" |
 
+#### 5.3.5 翻译风格配置（Translation Style）
+
+Enhance Metadata 的翻译行为受 **Translation Style** 设置控制，可在 `Preferences → AI Metadata → AI Prompt` 页面配置。共三个级别，对 AI 实际收到的 system prompt 有显著影响：
+
+| 级别 | 名称 | 行为说明 | 适用场景 |
+|------|------|----------|----------|
+| `official` | 官方译名优先（默认） | 强制要求 AI 先从网易云/QQ/Spotify/Apple Music 搜索官方译名，找不到才自行翻译 | 华语/日韩音乐，希望使用约定俗成的译名 |
+| `literal` | 字面直译 | 逐字直译，保留原意 | 古典音乐、纯音乐、需要严格对应原名 |
+| `semantic` | 意译 | 按意义翻译，优先自然中文表达 | 西方流行/摇滚，希望译名更符合中文习惯 |
+
+**实际生成的 Prompt 差异**（以 `official` 为例）：
+
+```
+Translation Rules (CRITICAL):
+
+STEP 1 - MANDATORY: Search for official translations from these platforms (in order of priority):
+  1. 网易云音乐 (music.163.com) - PRIMARY source for Asian music
+  2. QQ音乐 - Official Chinese translations
+
+STEP 2 - If found on ANY platform above, USE THAT EXACT translation. DO NOT modify it.
+STEP 3 - Only translate yourself if NO official translation exists on ANY platform.
+```
+
+**配套设置**（同一页面）：
+
+| 设置 | 说明 | 默认值 |
+|------|------|--------|
+| Translation Style | 翻译风格（见上表） | official |
+| Genre Language | 流派返回语言（english / chinese / bilingual） | english |
+| Keep Original When Uncertain | 不确定时保留原文而非猜测 | ☑ |
+| Min Translation Confidence | 最低翻译置信度阈值 | 0.5 |
+| Translation Platform Priority | 翻译平台优先级（拖拽排序） | netease → qq → spotify → applemusic |
+| Custom Translation Hints | 自定义翻译对照（每行 `原文名 = 译名`），支持中文输入 | （空） |
+| Custom Instructions | 高级用户附加指令，支持中文自由文本输入 | （空） |
+
+> **中文输入支持**：Custom Translation Hints 和 Custom Instructions 编辑框已全面支持 UTF-8 中文输入，可放心填写中文译名对照和指令。
+
 ---
 
-### 5.4 Rollback to Initial 详解
+### 5.4 Scrape & Enhance (Auto) 一键模式详解
 
 #### 5.4.1 功能说明
 
+将 Scrape Metadata 和 Enhance Metadata 两步操作自动串联，适合批量处理。流程如下：
+
+```
+Scrape Metadata（自动应用所有成功结果）→ Enhance Metadata（弹确认框）→ 用户确认 → 写入
+```
+
+#### 5.4.2 与分步模式的差异
+
+| 对比项 | 分步模式 | 一键模式 (Auto) |
+|--------|----------|-----------------|
+| Scrape 后是否弹确认框 | ✅ 弹出，用户选择字段 | ❌ 不弹，自动应用所有成功结果 |
+| Enhance 后是否弹确认框 | ✅ 弹出 | ✅ 弹出（保留人工审核） |
+| 选项对话框 | 各弹一次 | 两个选项对话框连续弹出（先 Scrape 选项，再 Enhance 选项） |
+| 适用场景 | 需要人工审核刮削结果 | 批量处理、信任刮削结果 |
+
+#### 5.4.3 使用建议
+
+- **首次使用**或处理**珍贵音乐库**时，建议用分步模式审核 Scrape 结果
+- **大批量处理**熟悉曲目时，用一键模式可节省大量点击时间
+- 一键模式下若 Scrape 阶段无任何成功结果，会直接结束不会启动 Enhance
+
+---
+
+### 5.5 Rollback to Initial 详解
+
+#### 5.5.1 功能说明
+
 将选中的曲目恢复到处理前的原始状态。
 
-#### 5.4.2 使用场景
+#### 5.5.2 使用场景
 
 - 处理结果不满意
 - 错误处理了曲目
 - 想要恢复原始标签
 
-#### 5.4.3 确认对话框
+#### 5.5.3 确认对话框
 
 ```
 Rollback all selected tracks to their initial state?
@@ -336,7 +423,7 @@ This will restore the original metadata before any AI processing.
 
 点击 **Yes** 确认回滚，点击 **No** 取消。
 
-#### 5.4.4 注意事项
+#### 5.5.4 注意事项
 
 - 只能回滚到最近一次 Stage 处理前的状态
 - 如果多次处理，只能回滚到第一次处理前的状态
@@ -344,13 +431,13 @@ This will restore the original metadata before any AI processing.
 
 ---
 
-### 5.5 Cache Statistics 详解
+### 5.6 Cache Statistics 详解
 
-#### 5.5.1 功能说明
+#### 5.6.1 功能说明
 
 显示缓存统计信息，帮助了解缓存使用情况。
 
-#### 5.5.2 统计信息
+#### 5.6.2 统计信息
 
 | 统计项 | 说明 |
 |--------|------|
@@ -363,13 +450,13 @@ This will restore the original metadata before any AI processing.
 
 ---
 
-### 5.6 Clear Cache 详解
+### 5.7 Clear Cache 详解
 
-#### 5.6.1 功能说明
+#### 5.7.1 功能说明
 
 清除缓存数据，支持两种模式。
 
-#### 5.6.2 清除选项对话框
+#### 5.7.2 清除选项对话框
 
 ```
 ┌─────────────────────────────────────────────┐
@@ -385,14 +472,14 @@ This will restore the original metadata before any AI processing.
 └─────────────────────────────────────────────┘
 ```
 
-#### 5.6.3 清除模式
+#### 5.7.3 清除模式
 
 | 选项状态 | 行为 |
 |---------|------|
 | ☐ Clear all cache（默认） | 只清除**选中曲目**的缓存 |
 | ☑ Clear all cache | 清除**全部**缓存 |
 
-#### 5.6.4 清除范围
+#### 5.7.4 清除范围
 
 | 操作 | stage1_cache | stage2_cache | cache_statistics |
 |------|-------------|-------------|-----------------|
@@ -405,12 +492,13 @@ This will restore the original metadata before any AI processing.
 
 访问设置：**File** → **Preferences** → **AI Metadata**
 
-设置页面分为三个子页面：
+设置页面分为四个子页面：
 
 | 页面 | 功能 |
 |------|------|
 | General | AI Provider、Python、Cache 设置 |
 | Data Sources | MusicBrainz、Discogs 配置 |
+| AI Prompt | 翻译风格、流派语言、自定义翻译对照、高级指令 |
 | Advanced | 批次大小、超时等高级设置 |
 
 ---
@@ -536,31 +624,77 @@ This will restore the original metadata before any AI processing.
 
 ---
 
-### 6.3 Advanced 设置页面
+### 6.3 AI Prompt 设置页面
 
-#### 6.3.1 Task Queue 区域
+此页面控制 Enhance Metadata 阶段的 AI 翻译/分类行为，所有设置实时生效（下次请求即应用，无需重启 worker）。
+
+#### 6.3.1 Translation 区域
+
+| 设置项 | 说明 | 选项 / 默认值 |
+|--------|------|---------------|
+| **Translation Style** | 翻译风格 | Official（默认）/ Literal / Semantic |
+| **Genre Language** | 流派返回语言 | English（默认）/ Chinese / Bilingual |
+| **Keep Original When Uncertain** | 不确定时保留原文 | ☑ 启用（默认） |
+| **Min Translation Confidence** | 最低翻译置信度阈值 | 0.5 |
+| **Translation Platform Priority** | 翻译平台优先级 | netease → qq → spotify → applemusic |
+
+**Translation Style 三级别说明**：
+
+| 级别 | 实际效果 |
+|------|----------|
+| Official | AI 必须先从配置的平台（网易云/QQ 等）搜索官方译名，找到则原样使用，找不到才自行翻译 |
+| Literal | 直接逐字直译，不查平台 |
+| Semantic | 按意义意译，优先自然中文表达 |
+
+#### 6.3.2 Custom Translation Hints 编辑框
+
+自定义翻译对照表，每行一条，格式 `原文名 = 译名`。AI 在翻译时会优先应用这些对照。
+
+**示例**（支持中文输入）：
+```
+Taylor Swift = 泰勒·斯威夫特
+The Beatles = 披头士乐队
+Bohemian Rhapsody = 波西米亚狂想曲
+```
+
+#### 6.3.3 Custom Instructions 编辑框（Advanced）
+
+高级用户自由文本指令，会原样附加到 AI 的 system prompt 末尾。可用于微调 AI 行为，例如：
+
+```
+优先使用港台译名风格，如"席琳·狄翁"而非"席琳·迪翁"。
+古典音乐作品名保留原文，不翻译。
+```
+
+> **UTF-8 支持**：两个编辑框均使用 Wide API + UTF-8 转换，完整支持中文输入与保存，保存到 `settings.json` 时以 UTF-8 编码存储。
+
+---
+
+### 6.4 Advanced 设置页面
+
+#### 6.4.1 Task Queue 区域
 
 | 设置项 | 说明 | 默认值 |
 |--------|------|--------|
-| **Batch Size** | Stage 1 每批处理的曲目数 | 50 |
+| **Batch Size** | Scrape Metadata 每批处理的曲目数 | 50 |
 
 **说明**：
 - 较大的批次大小可以提高处理速度
 - 但会增加内存使用和单次失败的影响范围
 - 建议范围：20-100
 
-#### 6.3.2 AI Batch 区域
+#### 6.4.2 AI Batch 区域
 
 | 设置项 | 说明 | 默认值 |
 |--------|------|--------|
-| **Batch Size** | Stage 2 每批处理的曲目数 | 10 |
+| **Batch Size** | Enhance Metadata 每批处理的曲目数 | 10 |
 
 **说明**：
 - AI 批处理大小取决于模型上下文窗口
 - 较大的值可能超出模型限制
 - 建议范围：5-20
 
-#### 6.3.3 Timeout 区域
+#### 6.4.3 Timeout 区域
 
 | 设置项 | 说明 | 默认值 |
 |--------|------|--------|
@@ -673,13 +807,39 @@ Preferences → AI Metadata → General
 | llama3.1:70b | 40 GB | 48 GB |
 | mistral:7b | 5 GB | 8 GB |
 
+### 7.5 DeepSeek
+
+#### 注册和获取 API Key
+
+1. 访问 [DeepSeek 开放平台](https://platform.deepseek.com/)
+2. 注册账号
+3. 进入 API Keys 页面创建 Key
+
+#### 配置步骤
+
+```
+Preferences → AI Metadata → General
+  Provider: DeepSeek
+  API Key: sk-xxxxxxxxxxxxxxxx
+  Model: deepseek-chat
+```
+
+#### 推荐模型
+
+| 模型 | 特点 |
+|------|------|
+| deepseek-chat | 通用对话模型，速度快，价格低 |
+| deepseek-reasoner | 推理增强，适合复杂分类任务 |
+
+**说明**：DeepSeek 使用 OpenAI 兼容接口，与 Zhipu AI 共享 OpenAI Provider 基类，配置方式类似。
+
 ---
 
 ## 8. 数据源配置
 
 ### 8.1 数据源优先级
 
-Stage 1 按以下优先级查询数据源：
+Scrape Metadata 按以下优先级查询数据源：
 
 ```
 1. MusicBrainz (权威，数据质量高)
@@ -712,8 +872,8 @@ Stage 1 按以下优先级查询数据源：
 
 插件使用 SQLite 数据库缓存处理结果：
 
-- **Stage 1 缓存**：基于 TITLE + ARTIST + ALBUM 的查询结果
-- **Stage 2 缓存**：基于完整元数据的增强结果
+- **Scrape 缓存**：基于 TITLE + ARTIST + ALBUM 的查询结果
+- **Enhance 缓存**：基于完整元数据的增强结果
 
 ### 9.2 缓存键生成
 
@@ -744,7 +904,7 @@ track_id = SHA256(path + "|" + subsong + "|" + file_size)
 
 ### 10.1 自动备份
 
-在执行 Stage 1 或 Stage 2 之前，插件会自动备份当前标签：
+在执行 Scrape Metadata 或 Enhance Metadata 之前，插件会自动备份当前标签：
 
 ```
 备份位置：%APPDATA%\foobar2000-v2\foo_metadata_enhancer\backup.db
@@ -813,7 +973,7 @@ track_id = SHA256(path + "|" + subsong + "|" + file_size)
 
 ### 12.2 处理时提示 "TITLE 或 ARTIST 缺失"
 
-**原因**：Stage 1 需要 TITLE 和 ARTIST 作为查询依据。
+**原因**：Scrape Metadata 需要 TITLE 和 ARTIST 作为查询依据。
 
 **解决方案**：
 1. 手动填写缺失的标签
@@ -1025,10 +1185,19 @@ cmake -B out/build ^
 
 ## 更新日志
 
+### v1.1.0
+
+- **菜单重构**：去除技术术语（Stage 1/2），按功能分组（主操作 / 回滚 / 工具）
+- **一键模式**：新增 "Scrape & Enhance (Auto)"，自动串联刮削 + 增强
+- **翻译风格配置**：新增 Translation Style 三级别（Official / Literal / Semantic），实测对 AI 生成的 prompt 有显著差异
+- **AI Prompt 设置页**：新增独立设置页，集中管理翻译风格、流派语言、自定义翻译对照、高级指令
+- **中文输入支持**：Custom Translation Hints 和 Custom Instructions 编辑框全面支持 UTF-8 中文输入
+- **DeepSeek Provider**：新增 DeepSeek AI 支持，与 Zhipu AI 共享 OpenAI 兼容基类
+
 ### v1.0.0
 
 - 初始版本发布
-- 支持 Stage 1/Stage 2 处理
+- 支持 Scrape / Enhance 两阶段处理
 - 支持多 AI Provider
 - 缓存系统
 - 备份与回滚

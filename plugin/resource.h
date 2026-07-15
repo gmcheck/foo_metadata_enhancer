@@ -20,6 +20,7 @@
 #define IDD_PREF_GENERAL             108
 #define IDD_PREF_DATA_SOURCES        109
 #define IDD_PREF_ADVANCED            110
+#define IDD_PREF_PROMPTS             111
 #define IDD_BATCH_SETTINGS           101
 #define IDD_COMPLETION               102
 #define IDD_ERROR                    103
@@ -236,3 +237,23 @@
 
 #define IDI_ICON                     3001
 #define IDB_LOGO                     3002
+
+// ===== AI Prompt 偏好页面控件（IDD_PREF_PROMPTS）=====
+#define IDC_GROUP_PROMPTS            3200
+#define IDC_TRANSLATION_STYLE_LABEL  3201
+#define IDC_TRANSLATION_STYLE        3202
+#define IDC_TRANSLATE_TITLE          3203
+#define IDC_TRANSLATE_ALBUM          3204
+#define IDC_TRANSLATE_ARTIST         3205
+#define IDC_GENRE_LANGUAGE_LABEL     3206
+#define IDC_GENRE_LANGUAGE           3207
+#define IDC_KEEP_ORIGINAL            3208
+#define IDC_MIN_CONFIDENCE_LABEL     3209
+#define IDC_MIN_CONFIDENCE           3210
+#define IDC_PLATFORM_PRIORITY_LABEL  3211
+#define IDC_PLATFORM_PRIORITY        3212
+#define IDC_CUSTOM_HINTS_LABEL       3213
+#define IDC_CUSTOM_HINTS             3214
+#define IDC_CUSTOM_INSTRUCTIONS_LABEL 3215
+#define IDC_CUSTOM_INSTRUCTIONS      3216
+#define IDC_EXPORT_TEMPLATES_BTN     3217

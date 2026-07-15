@@ -43,13 +43,16 @@ static const GUID guid_preferences_general =
     { 0x7a8b9c0e, 0x1e2f, 0x3a4b, { 0x5c, 0x6d, 0x7e, 0x8f, 0x9a, 0x0b, 0x1c, 0x2d } };
 static const GUID guid_preferences_data_sources = 
     { 0x7a8b9c0f, 0x1e2f, 0x3a4b, { 0x5c, 0x6d, 0x7e, 0x8f, 0x9a, 0x0b, 0x1c, 0x2d } };
-static const GUID guid_preferences_advanced = 
+static const GUID guid_preferences_advanced =
     { 0x7a8b9c10, 0x1e2f, 0x3a4b, { 0x5c, 0x6d, 0x7e, 0x8f, 0x9a, 0x0b, 0x1c, 0x2d } };
+static const GUID guid_preferences_prompts =
+    { 0x7a8b9c11, 0x1e2f, 0x3a4b, { 0x5c, 0x6d, 0x7e, 0x8f, 0x9a, 0x0b, 0x1c, 0x2d } };
 
 const GUID AIPreferencePageRoot::g_guid = guid_preferences_root;
 const GUID AIPreferencePageGeneral::g_guid = guid_preferences_general;
 const GUID AIPreferencePageDataSources::g_guid = guid_preferences_data_sources;
 const GUID AIPreferencePageAdvanced::g_guid = guid_preferences_advanced;
+const GUID AIPreferencePagePrompts::g_guid = guid_preferences_prompts;
 
 SettingsManager& SettingsManager::instance() {
     static SettingsManager instance;
@@ -131,6 +134,71 @@ static std::string get_dll_directory() {
         }
     }
     return ".";
+}
+
+/// 转义多行字符串为合法 JSON 字符串字面量（含外围双引号）
+static std::string json_escape_string(const std::string& s) {
+    std::string out;
+    out.reserve(s.size() + 2);
+    out.push_back('"');
+    for (char c : s) {
+        switch (c) {
+            case '"':  out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\b': out += "\\b";  break;
+            case '\f': out += "\\f";  break;
+            case '\n': out += "\\n";  break;
+            case '\r': out += "\\r";  break;
+            case '\t': out += "\\t";  break;
+            default:
+                if (static_cast<unsigned char>(c) < 0x20) {
+                    char buf[8];
+                    snprintf(buf, sizeof(buf), "\\u%04x", c);
+                    out += buf;
+                } else {
+                    out.push_back(c);
+                }
+        }
+    }
+    out.push_back('"');
+    return out;
+}
+
+/// UTF-8 string -> UTF-16 wstring
+static std::wstring utf8_to_wstring(const std::string& s) {
+    if (s.empty()) return std::wstring();
+    int len = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, nullptr, 0);
+    if (len <= 0) return std::wstring();
+    std::wstring ws(len - 1, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, &ws[0], len);
+    return ws;
+}
+
+/// UTF-16 wstring -> UTF-8 string
+static std::string wstring_to_utf8(const std::wstring& ws) {
+    if (ws.empty()) return std::string();
+    int len = WideCharToMultiByte(CP_UTF8, 0, ws.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    if (len <= 0) return std::string();
+    std::string s(len - 1, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, ws.c_str(), -1, &s[0], len, nullptr, nullptr);
+    return s;
+}
+
+/// SetDlgItemText 支持 UTF-8 输入（内部转 UTF-16 调用 W 版本）
+static void SetDlgItemTextUTF8(HWND wnd, int id, const std::string& utf8_str) {
+    SetDlgItemTextW(wnd, id, utf8_to_wstring(utf8_str).c_str());
+}
+
+/// GetDlgItemText 返回 UTF-8 字符串（内部调用 W 版本再转 UTF-8）
+static std::string GetDlgItemTextUTF8(HWND wnd, int id) {
+    HWND ctrl = GetDlgItem(wnd, id);
+    if (!ctrl) return std::string();
+    int len = GetWindowTextLengthW(ctrl);
+    if (len <= 0) return std::string();
+    std::wstring ws(len + 1, L'\0');
+    int actual = GetDlgItemTextW(wnd, id, &ws[0], len + 1);
+    ws.resize(actual);
+    return wstring_to_utf8(ws);
 }
 
 void SettingsManager::load_from_config_yaml() {
@@ -468,10 +536,11 @@ void SettingsManager::load_from_config_yaml() {
                 m_settings.provider = string_to_provider(default_provider);
             }
         }
-        else if (line.find("openrouter:") != std::string::npos || 
+        else if (line.find("openrouter:") != std::string::npos ||
                  line.find("zhipu:") != std::string::npos ||
                  line.find("gemini:") != std::string::npos ||
-                 line.find("ollama:") != std::string::npos) {
+                 line.find("ollama:") != std::string::npos ||
+                 line.find("deepseek:") != std::string::npos) {
             size_t pos = line.find(':');
             if (pos != std::string::npos) {
                 current_provider = trim_string(line.substr(0, pos));
@@ -725,10 +794,10 @@ void SettingsManager::load() {
             }
             std::string pc_str = content.substr(pc_start, pc_end - pc_start);
             
-            const char* prov_names[] = {"openrouter", "zhipu", "gemini", "ollama"};
-            AIProvider prov_types[] = {AIProvider::OpenRouter, AIProvider::Zhipu, AIProvider::Gemini, AIProvider::Ollama};
-            
-            for (int i = 0; i < 4; i++) {
+            const char* prov_names[] = {"openrouter", "zhipu", "gemini", "ollama", "deepseek"};
+            AIProvider prov_types[] = {AIProvider::OpenRouter, AIProvider::Zhipu, AIProvider::Gemini, AIProvider::Ollama, AIProvider::DeepSeek};
+
+            for (int i = 0; i < 5; i++) {
                 std::string search_name = std::string("\"") + prov_names[i] + "\":";
                 size_t prov_pos = pc_str.find(search_name);
                 if (prov_pos == std::string::npos) continue;
@@ -770,6 +839,68 @@ void SettingsManager::load() {
                 }
             }
         }
+    }
+
+    // 解析 prompts.user_prefs（Layer 3）
+    {
+        std::string ts = get_value("translation_style");
+        if (!ts.empty()) m_settings.prompt_prefs.translation_style = ts;
+
+        std::string gl = get_value("genre_language");
+        if (!gl.empty()) m_settings.prompt_prefs.genre_language = gl;
+
+        std::string ko = get_value("keep_original_when_uncertain");
+        if (!ko.empty()) m_settings.prompt_prefs.keep_original_when_uncertain = (ko == "true");
+
+        std::string mc = get_value("min_translation_confidence");
+        if (!mc.empty()) {
+            try { m_settings.prompt_prefs.min_translation_confidence = std::stod(mc); }
+            catch (...) {}
+        }
+
+        std::string pp = get_value("translation_platform_priority");
+        if (!pp.empty()) m_settings.prompt_prefs.translation_platform_priority = pp;
+
+        // 多行字符串字段需要处理转义：找到 "custom_translation_hints": 后的字符串字面量
+        auto extract_escaped_string = [&content](const std::string& key) -> std::string {
+            std::string search = "\"" + key + "\":";
+            size_t pos = content.find(search);
+            if (pos == std::string::npos) return "";
+            pos += search.length();
+            while (pos < content.length() && (content[pos] == ' ' || content[pos] == '\t' || content[pos] == '\n' || content[pos] == '\r')) pos++;
+            if (pos >= content.length() || content[pos] != '"') return "";
+            pos++;
+            std::string out;
+            while (pos < content.length()) {
+                char c = content[pos];
+                if (c == '\\' && pos + 1 < content.length()) {
+                    char next = content[pos + 1];
+                    switch (next) {
+                        case '"':  out.push_back('"');  break;
+                        case '\\': out.push_back('\\'); break;
+                        case 'n':  out.push_back('\n'); break;
+                        case 'r':  out.push_back('\r'); break;
+                        case 't':  out.push_back('\t'); break;
+                        case 'b':  out.push_back('\b'); break;
+                        case 'f':  out.push_back('\f'); break;
+                        default:   out.push_back(next);  break;
+                    }
+                    pos += 2;
+                } else if (c == '"') {
+                    break;
+                } else {
+                    out.push_back(c);
+                    pos++;
+                }
+            }
+            return out;
+        };
+
+        std::string hints = extract_escaped_string("custom_translation_hints");
+        if (!hints.empty()) m_settings.prompt_prefs.custom_translation_hints = hints;
+
+        std::string instr = extract_escaped_string("custom_instructions");
+        if (!instr.empty()) m_settings.prompt_prefs.custom_instructions = instr;
     }
 }
 
@@ -816,7 +947,21 @@ void SettingsManager::save() {
         file << "  \"discogs_consumer_key\": \"" << m_settings.discogs_consumer_key << "\",\n";
         file << "  \"discogs_consumer_secret\": \"" << m_settings.discogs_consumer_secret << "\",\n";
         file << "  \"log_level\": " << static_cast<int>(m_settings.log_level) << ",\n";
-        file << "  \"max_log_file_size_mb\": " << m_settings.max_log_file_size_mb << "\n";
+        file << "  \"max_log_file_size_mb\": " << m_settings.max_log_file_size_mb << ",\n";
+
+        // prompts.user_prefs（Layer 3）
+        file << "  \"prompts\": {\n";
+        file << "    \"user_prefs\": {\n";
+        file << "      \"translation_style\": \"" << m_settings.prompt_prefs.translation_style << "\",\n";
+        file << "      \"genre_language\": \"" << m_settings.prompt_prefs.genre_language << "\",\n";
+        file << "      \"keep_original_when_uncertain\": " << (m_settings.prompt_prefs.keep_original_when_uncertain ? "true" : "false") << ",\n";
+        file << "      \"min_translation_confidence\": " << m_settings.prompt_prefs.min_translation_confidence << ",\n";
+        file << "      \"translation_platform_priority\": \"" << m_settings.prompt_prefs.translation_platform_priority << "\",\n";
+        // 多行字符串以 JSON 字符串形式转义换行
+        file << "      \"custom_translation_hints\": " << json_escape_string(m_settings.prompt_prefs.custom_translation_hints) << ",\n";
+        file << "      \"custom_instructions\": " << json_escape_string(m_settings.prompt_prefs.custom_instructions) << "\n";
+        file << "    }\n";
+        file << "  }\n";
         file << "}\n";
     }
 }
@@ -958,6 +1103,22 @@ GUID AIPreferencePageAdvanced::get_parent_guid() {
 
 preferences_page_instance::ptr AIPreferencePageAdvanced::instantiate(HWND parent, preferences_page_callback::ptr callback) {
     return new service_impl_t<AIPreferencePageInstance>(parent, callback, IDD_PREF_ADVANCED);
+}
+
+const char* AIPreferencePagePrompts::get_name() {
+    return "AI Prompt";
+}
+
+GUID AIPreferencePagePrompts::get_guid() {
+    return g_guid;
+}
+
+GUID AIPreferencePagePrompts::get_parent_guid() {
+    return guid_preferences_root;
+}
+
+preferences_page_instance::ptr AIPreferencePagePrompts::instantiate(HWND parent, preferences_page_callback::ptr callback) {
+    return new service_impl_t<AIPreferencePageInstance>(parent, callback, IDD_PREF_PROMPTS);
 }
 
 AIPreferencePageInstance::AIPreferencePageInstance(HWND parent, preferences_page_callback::ptr callback, int dialog_id)
@@ -1118,6 +1279,30 @@ INT_PTR CALLBACK AIPreferencePageInstance::dialog_proc(HWND wnd, UINT msg, WPARA
                 case IDC_PYTHON_BROWSE:
                     self->on_browse_python();
                     break;
+
+                case IDC_TRANSLATION_STYLE:
+                case IDC_GENRE_LANGUAGE:
+                    if (HIWORD(wp) == CBN_SELCHANGE) {
+                        self->on_changed();
+                    }
+                    break;
+
+                case IDC_KEEP_ORIGINAL:
+                    self->on_changed();
+                    break;
+
+                case IDC_MIN_CONFIDENCE:
+                case IDC_PLATFORM_PRIORITY:
+                case IDC_CUSTOM_HINTS:
+                case IDC_CUSTOM_INSTRUCTIONS:
+                    if (HIWORD(wp) == EN_CHANGE) {
+                        self->on_changed();
+                    }
+                    break;
+
+                case IDC_EXPORT_TEMPLATES_BTN:
+                    self->on_export_templates();
+                    break;
             }
             return TRUE;
     }
@@ -1137,6 +1322,7 @@ void AIPreferencePageInstance::fill_combo_boxes() {
         SendMessageW(combo, CB_INSERTSTRING, 1, (LPARAM)L"Zhipu (智谱)");
         SendMessageW(combo, CB_INSERTSTRING, 2, (LPARAM)L"Gemini");
         SendMessageW(combo, CB_INSERTSTRING, 3, (LPARAM)L"Ollama");
+        SendMessageW(combo, CB_INSERTSTRING, 4, (LPARAM)L"DeepSeek");
         SendMessageW(combo, CB_SETCURSEL, static_cast<int>(m_settings.provider), 0);
         update_model_combo();
     }
@@ -1150,6 +1336,33 @@ void AIPreferencePageInstance::fill_combo_boxes() {
         SendMessageW(combo, CB_INSERTSTRING, 3, (LPARAM)L"ERROR");
         SendMessageW(combo, CB_SETCURSEL, static_cast<int>(m_settings.log_level), 0);
         Logger::instance().set_log_level(m_settings.log_level);
+    }
+
+    // Prompt 偏好页面组合框
+    combo = GetDlgItem(m_wnd, IDC_TRANSLATION_STYLE);
+    if (combo) {
+        SendMessageW(combo, CB_RESETCONTENT, 0, 0);
+        SendMessageW(combo, CB_INSERTSTRING, 0, (LPARAM)L"Official (recommended)");
+        SendMessageW(combo, CB_INSERTSTRING, 1, (LPARAM)L"Literal");
+        SendMessageW(combo, CB_INSERTSTRING, 2, (LPARAM)L"Semantic");
+        int style_idx = 0;
+        const std::string& ts = m_settings.prompt_prefs.translation_style;
+        if (ts == "literal") style_idx = 1;
+        else if (ts == "semantic") style_idx = 2;
+        SendMessageW(combo, CB_SETCURSEL, style_idx, 0);
+    }
+
+    combo = GetDlgItem(m_wnd, IDC_GENRE_LANGUAGE);
+    if (combo) {
+        SendMessageW(combo, CB_RESETCONTENT, 0, 0);
+        SendMessageW(combo, CB_INSERTSTRING, 0, (LPARAM)L"English");
+        SendMessageW(combo, CB_INSERTSTRING, 1, (LPARAM)L"Chinese");
+        SendMessageW(combo, CB_INSERTSTRING, 2, (LPARAM)L"Bilingual");
+        int lang_idx = 0;
+        const std::string& gl = m_settings.prompt_prefs.genre_language;
+        if (gl == "chinese") lang_idx = 1;
+        else if (gl == "bilingual") lang_idx = 2;
+        SendMessageW(combo, CB_SETCURSEL, lang_idx, 0);
     }
 }
 
@@ -1250,6 +1463,25 @@ void AIPreferencePageInstance::update_controls() {
     
     if (GetDlgItem(m_wnd, IDC_LOG_SIZE)) {
         SetDlgItemInt(m_wnd, IDC_LOG_SIZE, m_settings.max_log_file_size_mb, FALSE);
+    }
+
+    // Prompt 偏好页面控件
+    if (GetDlgItem(m_wnd, IDC_KEEP_ORIGINAL)) {
+        CheckDlgButton(m_wnd, IDC_KEEP_ORIGINAL, m_settings.prompt_prefs.keep_original_when_uncertain ? BST_CHECKED : BST_UNCHECKED);
+    }
+    if (GetDlgItem(m_wnd, IDC_MIN_CONFIDENCE)) {
+        // 用 0-100 整数表示 0.0-1.0
+        int conf = static_cast<int>(m_settings.prompt_prefs.min_translation_confidence * 100);
+        SetDlgItemInt(m_wnd, IDC_MIN_CONFIDENCE, conf, FALSE);
+    }
+    if (GetDlgItem(m_wnd, IDC_PLATFORM_PRIORITY)) {
+        SetDlgItemTextA(m_wnd, IDC_PLATFORM_PRIORITY, m_settings.prompt_prefs.translation_platform_priority.c_str());
+    }
+    if (GetDlgItem(m_wnd, IDC_CUSTOM_HINTS)) {
+        SetDlgItemTextUTF8(m_wnd, IDC_CUSTOM_HINTS, m_settings.prompt_prefs.custom_translation_hints);
+    }
+    if (GetDlgItem(m_wnd, IDC_CUSTOM_INSTRUCTIONS)) {
+        SetDlgItemTextUTF8(m_wnd, IDC_CUSTOM_INSTRUCTIONS, m_settings.prompt_prefs.custom_instructions);
     }
 }
 
@@ -1425,6 +1657,44 @@ void AIPreferencePageInstance::save_settings() {
     }
     if (GetDlgItem(m_wnd, IDC_LOG_SIZE)) {
         m_settings.max_log_file_size_mb = GetDlgItemInt(m_wnd, IDC_LOG_SIZE, NULL, FALSE);
+    }
+
+    // Prompt 偏好页面控件
+    combo = GetDlgItem(m_wnd, IDC_TRANSLATION_STYLE);
+    if (combo) {
+        int sel = ComboBox_GetCurSel(combo);
+        switch (sel) {
+            case 1:  m_settings.prompt_prefs.translation_style = "literal";  break;
+            case 2:  m_settings.prompt_prefs.translation_style = "semantic"; break;
+            default: m_settings.prompt_prefs.translation_style = "official"; break;
+        }
+    }
+    combo = GetDlgItem(m_wnd, IDC_GENRE_LANGUAGE);
+    if (combo) {
+        int sel = ComboBox_GetCurSel(combo);
+        switch (sel) {
+            case 1:  m_settings.prompt_prefs.genre_language = "chinese";   break;
+            case 2:  m_settings.prompt_prefs.genre_language = "bilingual"; break;
+            default: m_settings.prompt_prefs.genre_language = "english";   break;
+        }
+    }
+    if (GetDlgItem(m_wnd, IDC_KEEP_ORIGINAL)) {
+        m_settings.prompt_prefs.keep_original_when_uncertain = IsDlgButtonChecked(m_wnd, IDC_KEEP_ORIGINAL) == BST_CHECKED;
+    }
+    if (GetDlgItem(m_wnd, IDC_MIN_CONFIDENCE)) {
+        int conf = GetDlgItemInt(m_wnd, IDC_MIN_CONFIDENCE, NULL, FALSE);
+        m_settings.prompt_prefs.min_translation_confidence = conf / 100.0;
+    }
+    if (GetDlgItem(m_wnd, IDC_PLATFORM_PRIORITY)) {
+        char buffer[512] = {0};
+        GetDlgItemTextA(m_wnd, IDC_PLATFORM_PRIORITY, buffer, sizeof(buffer));
+        m_settings.prompt_prefs.translation_platform_priority = buffer;
+    }
+    if (GetDlgItem(m_wnd, IDC_CUSTOM_HINTS)) {
+        m_settings.prompt_prefs.custom_translation_hints = GetDlgItemTextUTF8(m_wnd, IDC_CUSTOM_HINTS);
+    }
+    if (GetDlgItem(m_wnd, IDC_CUSTOM_INSTRUCTIONS)) {
+        m_settings.prompt_prefs.custom_instructions = GetDlgItemTextUTF8(m_wnd, IDC_CUSTOM_INSTRUCTIONS);
     }
 }
 
@@ -1635,9 +1905,95 @@ void AIPreferencePageInstance::on_changed() {
     }
 }
 
+void AIPreferencePageInstance::on_export_templates() {
+    // 目标目录：<profile>/foo_metadata_enhancer/prompts/
+    std::string profile_path = core_api::get_profile_path();
+    if (profile_path.find("file://") == 0) {
+        profile_path = profile_path.substr(7);
+    }
+    std::string prompts_dir = profile_path + "\\foo_metadata_enhancer\\prompts";
+    CreateDirectoryA(prompts_dir.c_str(), NULL);
+
+    // 源目录：<dll_dir>/foo_metadata_enhancer/worker/prompts/templates/
+    // 或 <dll_dir>/../foo_metadata_enhancer/worker/prompts/templates/
+    std::string dll_dir = get_dll_directory();
+    std::vector<std::string> src_candidates = {
+        dll_dir + "\\foo_metadata_enhancer\\worker\\prompts\\templates",
+        dll_dir + "\\..\\foo_metadata_enhancer\\worker\\prompts\\templates",
+        dll_dir + "\\worker\\prompts\\templates"
+    };
+
+    std::string src_dir;
+    for (const auto& candidate : src_candidates) {
+        DWORD attr = GetFileAttributesA(candidate.c_str());
+        if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY)) {
+            src_dir = candidate;
+            break;
+        }
+    }
+
+    if (src_dir.empty()) {
+        MessageBoxA(m_wnd,
+            "Could not find templates directory.\n"
+            "Expected: worker/prompts/templates/",
+            "Export Failed",
+            MB_OK | MB_ICONERROR);
+        return;
+    }
+
+    const char* filenames[] = {
+        "genre_categories.md",
+        "edition_types.md",
+        "source_priority.md",
+        "translation_platforms.md"
+    };
+
+    int copied = 0;
+    int skipped = 0;
+    for (const char* fname : filenames) {
+        std::string src = src_dir + "\\" + fname;
+        std::string dst = prompts_dir + "\\" + fname;
+
+        if (GetFileAttributesA(dst.c_str()) != INVALID_FILE_ATTRIBUTES) {
+            skipped++;
+            continue;
+        }
+
+        if (CopyFileA(src.c_str(), dst.c_str(), TRUE)) {
+            copied++;
+        } else {
+            Logger::instance().warning(std::string("on_export_templates: Failed to copy ") + fname);
+        }
+    }
+
+    std::string msg;
+    if (copied > 0) {
+        msg = "Exported " + std::to_string(copied) + " template file(s) to:\n" + prompts_dir;
+        if (skipped > 0) {
+            msg += "\n\n" + std::to_string(skipped) + " file(s) skipped (already exist).";
+        }
+        msg += "\n\nEdit those .md files to customize domain knowledge.\n"
+               "Changes take effect on next AI call (hot reload).";
+        MessageBoxA(m_wnd, msg.c_str(), "Export Successful", MB_OK | MB_ICONINFORMATION);
+
+        // 打开 prompts 目录
+        int len = MultiByteToWideChar(CP_UTF8, 0, prompts_dir.c_str(), -1, NULL, 0);
+        std::wstring wprompts(len, 0);
+        MultiByteToWideChar(CP_UTF8, 0, prompts_dir.c_str(), -1, &wprompts[0], len);
+        ShellExecuteW(NULL, L"open", wprompts.c_str(), NULL, NULL, SW_SHOWNORMAL);
+    } else if (skipped > 0) {
+        msg = "All template files already exist in:\n" + prompts_dir +
+              "\n\nEdit them directly to customize.";
+        MessageBoxA(m_wnd, msg.c_str(), "Nothing to Export", MB_OK | MB_ICONINFORMATION);
+    } else {
+        MessageBoxA(m_wnd, "Failed to export templates. Check logs.", "Export Failed", MB_OK | MB_ICONERROR);
+    }
+}
+
 static preferences_page_factory_t<AIPreferencePageRoot> g_preferences_page_root_factory;
 static preferences_page_factory_t<AIPreferencePageGeneral> g_preferences_page_general_factory;
 static preferences_page_factory_t<AIPreferencePageDataSources> g_preferences_page_data_sources_factory;
 static preferences_page_factory_t<AIPreferencePageAdvanced> g_preferences_page_advanced_factory;
+static preferences_page_factory_t<AIPreferencePagePrompts> g_preferences_page_prompts_factory;
 
 }
