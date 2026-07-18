@@ -9,8 +9,7 @@ import logging
 from typing import Dict, Any, Optional, List
 from dataclasses import dataclass
 
-from data_sources.base import QueryInput, Candidate, DataSourceType
-from core.resolver import FinalResult
+from data_sources.base import QueryInput, Candidate, DataSourceType, FinalResult
 from common.text_utils import clean_dict_values
 from prompts import build_inference_prompt
 
@@ -93,8 +92,8 @@ class AIInferencer:
                     label=inference_result.get("label", ""),
                     country=inference_result.get("country", ""),
                     confidence=inference_result.get("confidence", 0.5),
-                    source=DataSourceType.AI,
-                    sources=[DataSourceType.AI],
+                    source=DataSourceType.AI.value,
+                    sources=[DataSourceType.AI.value],
                     is_fallback=True,
                     reasoning=inference_result.get("reasoning", "AI inference from limited information")
                 )
@@ -192,7 +191,7 @@ class AIInferencer:
             artist=query.artist,
             album=query.album,
             confidence=0.0,
-            source=DataSourceType.AI,
+            source=DataSourceType.AI.value,
             sources=[],
             is_fallback=True,
             reasoning="No inference possible - insufficient information"

@@ -131,7 +131,7 @@ inline const char* method_shutdown() { return "shutdown"; }
  * @brief 获取缓存数据库名称
  * @return 数据库文件名字符串
  */
-inline const char* cache_db_name() { return "cache.db"; }
+inline const char* cache_db_name() { return "foo_metadata_enhancer.db"; }
 
 /**
  * @brief 获取配置文件名称

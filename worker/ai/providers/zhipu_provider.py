@@ -23,6 +23,9 @@ class ZhipuProvider(OpenAIProvider):
 
     DEFAULT_BASE_URL = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
 
+    # 智谱端点不兼容 OpenAI Responses API，禁用 web_search 路径
+    supports_web_search = False
+
     SUPPORTED_MODELS = [
         "glm-4-plus",
         "glm-4-0520",

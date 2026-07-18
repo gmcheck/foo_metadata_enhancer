@@ -1106,7 +1106,7 @@ preferences_page_instance::ptr AIPreferencePageAdvanced::instantiate(HWND parent
 }
 
 const char* AIPreferencePagePrompts::get_name() {
-    return "AI Prompt";
+    return "Translation";
 }
 
 GUID AIPreferencePagePrompts::get_guid() {
@@ -1281,7 +1281,6 @@ INT_PTR CALLBACK AIPreferencePageInstance::dialog_proc(HWND wnd, UINT msg, WPARA
                     break;
 
                 case IDC_TRANSLATION_STYLE:
-                case IDC_GENRE_LANGUAGE:
                     if (HIWORD(wp) == CBN_SELCHANGE) {
                         self->on_changed();
                     }
@@ -1352,18 +1351,8 @@ void AIPreferencePageInstance::fill_combo_boxes() {
         SendMessageW(combo, CB_SETCURSEL, style_idx, 0);
     }
 
-    combo = GetDlgItem(m_wnd, IDC_GENRE_LANGUAGE);
-    if (combo) {
-        SendMessageW(combo, CB_RESETCONTENT, 0, 0);
-        SendMessageW(combo, CB_INSERTSTRING, 0, (LPARAM)L"English");
-        SendMessageW(combo, CB_INSERTSTRING, 1, (LPARAM)L"Chinese");
-        SendMessageW(combo, CB_INSERTSTRING, 2, (LPARAM)L"Bilingual");
-        int lang_idx = 0;
-        const std::string& gl = m_settings.prompt_prefs.genre_language;
-        if (gl == "chinese") lang_idx = 1;
-        else if (gl == "bilingual") lang_idx = 2;
-        SendMessageW(combo, CB_SETCURSEL, lang_idx, 0);
-    }
+    // Note: IDC_GENRE_LANGUAGE removed - genre is now sourced from MusicBrainz
+    // (Stage1) in English, so the language selection is no longer applicable.
 }
 
 void AIPreferencePageInstance::update_controls() {
@@ -1669,15 +1658,7 @@ void AIPreferencePageInstance::save_settings() {
             default: m_settings.prompt_prefs.translation_style = "official"; break;
         }
     }
-    combo = GetDlgItem(m_wnd, IDC_GENRE_LANGUAGE);
-    if (combo) {
-        int sel = ComboBox_GetCurSel(combo);
-        switch (sel) {
-            case 1:  m_settings.prompt_prefs.genre_language = "chinese";   break;
-            case 2:  m_settings.prompt_prefs.genre_language = "bilingual"; break;
-            default: m_settings.prompt_prefs.genre_language = "english";   break;
-        }
-    }
+    // Note: IDC_GENRE_LANGUAGE removed - genre is now sourced from MusicBrainz (Stage1).
     if (GetDlgItem(m_wnd, IDC_KEEP_ORIGINAL)) {
         m_settings.prompt_prefs.keep_original_when_uncertain = IsDlgButtonChecked(m_wnd, IDC_KEEP_ORIGINAL) == BST_CHECKED;
     }
@@ -1728,6 +1709,12 @@ void AIPreferencePageInstance::on_test_api() {
     }
     
     if (!ai_core->is_initialized()) {
+        // 设置数据库路径为 {fb2k_profile}/foo_metadata_enhancer.db
+        std::string profile_path = core_api::get_profile_path();
+        if (profile_path.find("file://") == 0) {
+            profile_path = profile_path.substr(7);
+        }
+        ai_core->set_cache_path(profile_path + "\\" + constants::cache_db_name());
         SetDlgItemTextA(m_wnd, IDC_STATUS_TEXT, "[1/3] Initializing AI Core...");
         if (!ai_core->initialize()) {
             SetDlgItemTextA(m_wnd, IDC_STATUS_TEXT, "[ERROR] Failed to initialize AI Core");
@@ -1841,8 +1828,12 @@ void AIPreferencePageInstance::on_clear_cache() {
     
     if (result == IDYES) {
         std::string cache_path = core_api::get_profile_path();
-        cache_path += "\\foo_metadata_enhancer\\cache\\ai_metadata_cache.db";
-        
+        if (cache_path.find("file://") == 0) {
+            cache_path = cache_path.substr(7);
+        }
+        cache_path += "\\";
+        cache_path += constants::cache_db_name();
+
         if (DeleteFileA(cache_path.c_str())) {
             SetDlgItemTextA(m_wnd, IDC_STATUS_TEXT, "Cache cleared successfully");
             popup_message::g_show("Cache cleared successfully", "AI Metadata");

@@ -45,51 +45,162 @@ static void batch_update_metadata(
 
 static std::map<std::string, std::string> extract_full_snapshot(const file_info& info) {
     std::map<std::string, std::string> snapshot;
-    
+
+    // multi-value 字段的分隔符：使用 ASCII Unit Separator (0x1F)
+    // 该字符不会出现在正常 metadata 中，且不会被 serialize_snapshot 转义，
+    // 因此向后兼容（单 value 字段不含此分隔符，反序列化后与原值一致）。
+    static const char kMultiValueSep = '\x1F';
+
     size_t meta_count = info.meta_get_count();
     for (size_t i = 0; i < meta_count; ++i) {
         const char* field_name = info.meta_enum_name(i);
         if (!field_name) continue;
-        
+
         std::string field_upper = field_name;
         std::transform(field_upper.begin(), field_upper.end(), field_upper.begin(), ::toupper);
-        
+
         if (BackupManager::is_field_blacklisted(field_upper)) {
             continue;
         }
-        
-        const char* value = info.meta_get(field_name, 0);
-        if (value && strlen(value) > 0) {
-            snapshot[field_upper] = value;
+
+        // 保存 multi-value 字段的所有 values（foobar2000 支持一字段多值，
+        // 如合辑 ARTIST = ["Various Artists", "미도와 파라솔"]）。
+        // 原实现只取 meta_get(field, 0)，回滚时会丢失后续 values。
+        const t_size value_count = info.meta_get_count_by_name(field_name);
+        std::string combined;
+        for (t_size v = 0; v < value_count; ++v) {
+            const char* value = info.meta_get(field_name, v);
+            if (!value || strlen(value) == 0) continue;
+            if (!combined.empty()) {
+                combined.push_back(kMultiValueSep);
+            }
+            combined.append(value);
+        }
+        if (!combined.empty()) {
+            snapshot[field_upper] = combined;
         }
     }
-    
+
     return snapshot;
 }
 
 static void apply_snapshot_to_info(file_info& info, const std::map<std::string, std::string>& snapshot) {
+    static const char kMultiValueSep = '\x1F';
+
     size_t meta_count = info.meta_get_count();
     std::vector<std::string> fields_to_remove;
-    
+
     for (size_t i = 0; i < meta_count; ++i) {
         const char* field_name = info.meta_enum_name(i);
         if (!field_name) continue;
-        
+
         std::string field_upper = field_name;
         std::transform(field_upper.begin(), field_upper.end(), field_upper.begin(), ::toupper);
-        
+
         if (!BackupManager::is_field_blacklisted(field_upper)) {
             fields_to_remove.push_back(field_upper);
         }
     }
-    
+
     for (const auto& field : fields_to_remove) {
         info.meta_remove_field(field.c_str());
     }
-    
+
     for (const auto& [field_name, field_value] : snapshot) {
-        if (!field_value.empty()) {
-            info.meta_set(field_name.c_str(), field_value.c_str());
+        if (field_value.empty()) continue;
+
+        // 解析 multi-value：按 kMultiValueSep 拆分，逐个 meta_add
+        // 单 value 字段不含分隔符，拆分结果为 1 个元素，等价于 meta_set
+        std::vector<std::string> values;
+        std::string current;
+        for (char c : field_value) {
+            if (c == kMultiValueSep) {
+                values.push_back(current);
+                current.clear();
+            } else {
+                current.push_back(c);
+            }
+        }
+        values.push_back(current);
+
+        for (const auto& v : values) {
+            if (!v.empty()) {
+                info.meta_add(field_name.c_str(), v.c_str());
+            }
+        }
+    }
+}
+
+// 返回每种操作类型影响的字段集合（大写）
+// 三功能边界（V8.2）：
+//   Scrape   : 从外部数据源获取本地没有的数据（MusicBrainz/Discogs/AI 降级）→ 影响全量字段
+//   Enhancer : 基于已有元数据生成新价值（翻译），不获取新事实 → 仅影响 TITLE_ZH/ALBUM_ZH/ARTIST_ZH
+//   Normalize: 已有 Tag → 标准 Tag（歌手规范化、Genre 映射等）→ 影响用户选定的 field
+// Scrape 影响：全量（返回空 set 表示全量）
+// Translate 影响：TITLE_ZH / ALBUM_ZH / ARTIST_ZH（Stage2 翻译产物）
+// Normalize 影响：ARTIST / ALBUM ARTIST / COMPOSER / PERFORMER 等（用户选的 field）
+static std::set<std::string> get_operation_fields(ai_metadata::OperationType op_type) {
+    std::set<std::string> fields;
+    switch (op_type) {
+        case ai_metadata::OperationType::Scrape:
+            // 空 set = 全量回滚（删除所有非黑名单字段后重设）
+            break;
+        case ai_metadata::OperationType::Translate:
+            fields = {"TITLE_ZH", "ALBUM_ZH", "ARTIST_ZH"};
+            break;
+        case ai_metadata::OperationType::Normalize:
+            // Normalize 通常改 ARTIST / ALBUM ARTIST，但也可能扩展到其他字段
+            // 这里列常见的归一化目标字段
+            fields = {"ARTIST", "ALBUM ARTIST", "ALBUM_ARTIST",
+                      "COMPOSER", "PERFORMER", "ALBUMARTIST"};
+            break;
+    }
+    return fields;
+}
+
+// 仅应用快照中属于指定字段集合的字段（部分回滚）
+// fields 为空时退化为全量应用（与 apply_snapshot_to_info 等价）
+static void apply_partial_snapshot_to_info(
+    file_info& info,
+    const std::map<std::string, std::string>& snapshot,
+    const std::set<std::string>& fields
+) {
+    static const char kMultiValueSep = '\x1F';
+
+    if (fields.empty()) {
+        apply_snapshot_to_info(info, snapshot);
+        return;
+    }
+
+    // 1. 删除当前 info 中属于 fields 的字段（清掉该操作改过的字段）
+    for (const auto& f : fields) {
+        info.meta_remove_field(f.c_str());
+    }
+
+    // 2. 从快照中恢复属于 fields 的字段
+    for (const auto& [field_name, field_value] : snapshot) {
+        std::string field_upper = field_name;
+        std::transform(field_upper.begin(), field_upper.end(), field_upper.begin(), ::toupper);
+        if (!fields.count(field_upper) || field_value.empty()) continue;
+
+        // 解析 multi-value：按 kMultiValueSep 拆分，逐个 meta_add
+        // 单 value 字段不含分隔符，拆分结果为 1 个元素，等价于 meta_set
+        std::vector<std::string> values;
+        std::string current;
+        for (char c : field_value) {
+            if (c == kMultiValueSep) {
+                values.push_back(current);
+                current.clear();
+            } else {
+                current.push_back(c);
+            }
+        }
+        values.push_back(current);
+
+        for (const auto& v : values) {
+            if (!v.empty()) {
+                info.meta_add(field_name.c_str(), v.c_str());
+            }
         }
     }
 }
@@ -107,6 +218,12 @@ static bool ensure_ai_core_initialized() {
     g_ai_core->set_ai_batch_size(settings.ai_batch_size);
     
     if (!g_ai_core->is_initialized()) {
+        // 设置数据库路径为 {fb2k_profile}/foo_metadata_enhancer.db
+        std::string profile_path = core_api::get_profile_path();
+        if (profile_path.find("file://") == 0) {
+            profile_path = profile_path.substr(7);
+        }
+        g_ai_core->set_cache_path(profile_path + "\\" + constants::cache_db_name());
         Logger::instance().info("[ensure_ai_core_initialized] AICore not initialized, calling initialize()");
         bool result = g_ai_core->initialize();
         Logger::instance().info("[ensure_ai_core_initialized] initialize() returned: " + std::string(result ? "true" : "false"));
@@ -232,52 +349,52 @@ public:
         metadb_handle_list modified_tracks;
         pfc::list_t<file_info_impl> modified_infos;
         
-        for (size_t i = 0; i < m_results.size() && i < m_tracks.get_count(); ++i) {
+        for (size_t i = 0; i < m_results.size() && i < m_tracks.get_count() && i < m_inputs.size(); ++i) {
             if (!selected[i]) continue;
-            
+
             const auto& result = m_results[i];
             if (!result.success) continue;
-            
+
             metadb_handle_ptr handle = m_tracks.get_item(i);
             file_info_impl info;
             if (handle->get_info(info)) {
                 std::map<std::string, std::string> original_snapshot = extract_full_snapshot(info);
-                
+
                 std::set<std::string> sources;
                 float total_confidence = 0.0f;
                 int confidence_count = 0;
-                
+
                 auto should_scrape_field = [](const std::string& field) -> bool {
                     return ConfirmResultDialog::IsFieldSelected(field);
                 };
-                
+
                 for (const auto& [field_name, field_value] : result.scraped_fields) {
                     if (!should_scrape_field(field_name)) {
                         continue;
                     }
-                    
+
                     std::string field_upper = field_name;
                     std::transform(field_upper.begin(), field_upper.end(), field_upper.begin(), ::toupper);
-                    
+
                     if (field_upper == "YEAR") {
                         field_upper = "DATE";
                     }
-                    
+
                     info.meta_set(field_upper.c_str(), field_value.value.c_str());
-                    
+
                     if (field_value.source == DataSourceType::MUSICBRAINZ) sources.insert("musicbrainz");
                     else if (field_value.source == DataSourceType::DISCOGS) sources.insert("discogs");
                     else sources.insert("ai");
                     total_confidence += field_value.confidence;
                     confidence_count++;
                 }
-                
+
                 std::string data_source;
                 for (const auto& s : sources) {
                     if (!data_source.empty()) data_source += ",";
                     data_source += s;
                 }
-                
+
                 std::string confidence_summary;
                 if (confidence_count > 0) {
                     float avg = total_confidence / confidence_count;
@@ -285,23 +402,28 @@ public:
                     oss << std::fixed << std::setprecision(2) << avg;
                     confidence_summary = oss.str();
                 }
-                
+
                 if (g_ai_core && g_ai_core->is_initialized()) {
-                    g_ai_core->ensure_snapshot(
+                    // 备份刮削前的状态，支持回滚（Scrape 类型）
+                    Logger::instance().info("[Stage1] Saving Scrape snapshot for track_id=" + m_inputs[i].track_id);
+                    bool snap_ok = g_ai_core->ensure_operation_snapshot(
                         m_inputs[i].track_id,
+                        ai_metadata::OperationType::Scrape,
                         original_snapshot
                     );
-                    
+                    Logger::instance().info("[Stage1] ensure_operation_snapshot(Scrape) returned " +
+                        std::string(snap_ok ? "true" : "false") + ", track_id=" + m_inputs[i].track_id);
+
                     std::string cache_key = g_ai_core->generate_stage1_cache_key(m_inputs[i]);
                     g_ai_core->save_stage1_cache(cache_key, result, m_inputs[i]);
                 }
-                
+
                 modified_tracks.add_item(handle);
                 modified_infos.add_item(info);
                 applied++;
-                Logger::instance().info("[Stage2] Added track to modified list, applied=" + std::to_string(applied));
+                Logger::instance().info("[Stage1] Added track " + std::to_string(i+1) + " to modified list, applied=" + std::to_string(applied));
             } else {
-                Logger::instance().warning("[Stage2] Failed to get info for track " + std::to_string(i+1));
+                Logger::instance().warning("[Stage1] Failed to get info for track " + std::to_string(i+1));
             }
         }
         
@@ -507,20 +629,6 @@ public:
                 if (should_write_field("artist_zh") && !result.artist_zh.empty()) {
                     info.meta_set("ARTIST_ZH", result.artist_zh.c_str());
                 }
-                if (should_write_field("genre") && !result.genre_value.empty()) {
-                    info.meta_set("GENRE", result.genre_value.c_str());
-                    if (result.genre_confidence > 0) {
-                        total_conf += result.genre_confidence;
-                        conf_count++;
-                    }
-                }
-                if (should_write_field("edition") && !result.edition_value.empty()) {
-                    info.meta_set("EDITION", result.edition_value.c_str());
-                    if (result.edition_confidence > 0) {
-                        total_conf += result.edition_confidence;
-                        conf_count++;
-                    }
-                }
                 
                 if (conf_count > 0) {
                     std::ostringstream oss;
@@ -529,11 +637,16 @@ public:
                 }
                 
                 if (g_ai_core && g_ai_core->is_initialized()) {
-                    g_ai_core->ensure_snapshot(
+                    // 备份 Enhance 前的状态，支持回滚（Translate 类型）
+                    Logger::instance().info("[Stage2] Saving Translate snapshot for track_id=" + m_inputs[i].track_id);
+                    bool snap_ok = g_ai_core->ensure_operation_snapshot(
                         m_inputs[i].track_id,
+                        ai_metadata::OperationType::Translate,
                         original_snapshot
                     );
-                    
+                    Logger::instance().info("[Stage2] ensure_operation_snapshot(Translate) returned " +
+                        std::string(snap_ok ? "true" : "false") + ", track_id=" + m_inputs[i].track_id);
+
                     std::string cache_key = g_ai_core->generate_stage2_cache_key(m_inputs[i], m_options);
                     g_ai_core->save_stage2_cache(cache_key, result, m_inputs[i], m_options);
                 }
@@ -671,8 +784,6 @@ TrackInput extract_track_input(metadb_handle_ptr handle) {
                            "label=" + label_str + ", " +
                            "language_hint=" + language_hint_str + ", " +
                            "file_hash=" + file_hash_str + ", " +
-                           "classify_genre=" + std::to_string(input.options.classify_genre) + ", " +
-                           "identify_edition=" + std::to_string(input.options.identify_edition) + ", " +
                            "translate_metadata=" + std::to_string(input.options.translate_metadata));
     
     return input;
@@ -713,8 +824,10 @@ static const GUID guid_rollback_initial =
     { 0xb456789a, 0x3456, 0x789a, { 0xbc, 0xde, 0xf0, 0x12, 0x34, 0x56, 0x78, 0x9a } };
 static const GUID guid_cache_stats = 
     { 0x92345678, 0x1234, 0x5678, { 0x9a, 0xbc, 0xde, 0xf0, 0x12, 0x34, 0x56, 0x78 } };
-static const GUID guid_clear_cache = 
+static const GUID guid_clear_cache =
     { 0xa3456789, 0x2345, 0x6789, { 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89 } };
+static const GUID guid_normalize =
+    { 0xc456789a, 0xbcd0, 0x1234, { 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0, 0x12, 0x34 } };
 
 class V8MenuHandler : public contextmenu_item_v2 {
 public:
@@ -733,6 +846,7 @@ public:
     void stage1_scrape(metadb_handle_list_cref p_data);
     void stage2_enhance(metadb_handle_list_cref p_data);
     void scrape_and_enhance(metadb_handle_list_cref p_data);
+    void normalize_metadata(metadb_handle_list_cref p_data);
     void rollback_to_initial(metadb_handle_list_cref p_data);
     void show_cache_stats();
     void clear_cache(metadb_handle_list_cref p_data);
@@ -813,7 +927,7 @@ contextmenu_item_node_root* V8MenuHandler::instantiate_item(unsigned p_index, me
         "Scrape basic metadata (title, artist, album, year, etc.) from MusicBrainz, Discogs, and AI sources.",
         [this](metadb_handle_list_cref data) { stage1_scrape(data); }, has_selection));
     root->add_child(new MenuNodeCommand("Enhance Metadata", guid_stage2_enhance,
-        "Enhance metadata: translate titles to Chinese, classify genre, identify edition (remastered, live, etc.).",
+        "Enhance metadata: translate title/album/artist to Chinese based on existing tags.",
         [this](metadb_handle_list_cref data) { stage2_enhance(data); }, has_selection));
     root->add_child(new MenuNodeCommand("Scrape & Enhance (Auto)", guid_scrape_and_enhance,
         "Run Scrape then Enhance automatically in one step. Skips intermediate confirmation dialogs.",
@@ -821,9 +935,17 @@ contextmenu_item_node_root* V8MenuHandler::instantiate_item(unsigned p_index, me
 
     root->add_child(new MenuNodeSeparator());
 
+    // Normalize 组
+    root->add_child(new MenuNodeCommand("Normalize...", guid_normalize,
+        "Normalize metadata: unify different writings of the same entity (e.g. BEYOND vs Beyond). "
+        "Opens a field selection dialog, then uses SQLite knowledge base + AI to suggest canonical names.",
+        [this](metadb_handle_list_cref data) { normalize_metadata(data); }, has_selection));
+
+    root->add_child(new MenuNodeSeparator());
+
     // 回滚组
-    root->add_child(new MenuNodeCommand("Rollback to Initial", guid_rollback_initial,
-        "Restore selected tracks to their original metadata before any AI processing.",
+    root->add_child(new MenuNodeCommand("Rollback", guid_rollback_initial,
+        "Rollback selected operations: choose which to undo (scrape / enhance / normalize).",
         [this](metadb_handle_list_cref data) { rollback_to_initial(data); }, has_selection));
 
     root->add_child(new MenuNodeSeparator());
@@ -1079,9 +1201,9 @@ void V8MenuHandler::scrape_and_enhance(metadb_handle_list_cref p_data) {
 }
 
 void V8MenuHandler::rollback_to_initial(metadb_handle_list_cref p_data) {
-    Logger::instance().info("[Rollback] ===== START ROLLBACK TO INITIAL =====");
+    Logger::instance().info("[Rollback] ===== START ROLLBACK =====");
     Logger::instance().info("[Rollback] track count = " + std::to_string(p_data.get_count()));
-    
+
     if (p_data.get_count() == 0) {
         popup_message::g_show("No tracks selected", "AI Metadata V8");
         return;
@@ -1090,19 +1212,13 @@ void V8MenuHandler::rollback_to_initial(metadb_handle_list_cref p_data) {
         popup_message::g_show("Failed to initialize AI core", "AI Metadata V8");
         return;
     }
-    
-    int result = MessageBoxW(core_api::get_main_window(),
-        L"Rollback all selected tracks to their initial state?\n\nThis will restore the original metadata before any AI processing.",
-        L"Rollback to Initial", MB_YESNO | MB_ICONQUESTION);
-    if (result != IDYES) {
-        popup_message::g_show("Rollback cancelled", "AI Metadata V8");
-        return;
-    }
-    
-    int success_count = 0, no_backup_count = 0, fail_count = 0;
-    metadb_handle_list modified_tracks;
-    pfc::list_t<file_info_impl> modified_infos;
-    
+
+    // 1. 计算每个 track 的 track_id，并收集
+    std::vector<std::string> track_ids;
+    std::vector<metadb_handle_ptr> handles;
+    track_ids.reserve(p_data.get_count());
+    handles.reserve(p_data.get_count());
+
     for (size_t i = 0; i < p_data.get_count(); ++i) {
         metadb_handle_ptr handle = p_data.get_item(i);
         const char* path = handle->get_path();
@@ -1110,45 +1226,146 @@ void V8MenuHandler::rollback_to_initial(metadb_handle_list_cref p_data) {
         t_filesize file_size = handle->get_filesize();
         std::string track_id = CacheLayer::generate_track_uid(path ? path : "", subsong,
             file_size != foobar2000_io::filesize_invalid ? file_size : 0);
-        
-        Logger::instance().info("[Rollback] Processing track " + std::to_string(i+1) + "/" + 
-            std::to_string(p_data.get_count()) + ", track_id=" + track_id);
-        
-        auto snapshot_opt = g_ai_core->rollback_snapshot(track_id);
-        if (!snapshot_opt.has_value() || snapshot_opt->empty()) {
-            Logger::instance().info("[Rollback] No snapshot found for track_id=" + track_id);
-            no_backup_count++;
+        track_ids.push_back(track_id);
+        handles.push_back(handle);
+        Logger::instance().info("[Rollback] track[" + std::to_string(i) + "] track_id=" + track_id +
+            ", path=" + (path ? path : "<null>") + ", subsong=" + std::to_string(subsong) +
+            ", file_size=" + std::to_string(file_size));
+    }
+
+    // 2. 批量查询每个 track 拥有哪些可回滚的操作类型
+    Logger::instance().info("[Rollback] Querying operations for " + std::to_string(track_ids.size()) + " track_ids");
+    auto ops_per_track = g_ai_core->get_operations_for_tracks(track_ids);
+    Logger::instance().info("[Rollback] get_operations_for_tracks returned " +
+        std::to_string(ops_per_track.size()) + " entries");
+
+    // 统计每种类型有多少 track 可回滚
+    std::map<ai_metadata::OperationType, int> type_counts;
+    std::set<ai_metadata::OperationType> available_set;
+    for (const auto& [tid, ops] : ops_per_track) {
+        for (auto op : ops) {
+            type_counts[op]++;
+            available_set.insert(op);
+            Logger::instance().info("[Rollback] track_id=" + tid + " has op=" +
+                std::string(ai_metadata::operation_type_to_string(op)));
+        }
+    }
+
+    if (available_set.empty()) {
+        Logger::instance().warning("[Rollback] No snapshots found - showing popup and returning");
+        popup_message::g_show("No rollback snapshots found for any selected track.\n"
+                              "Please run Scrape / Enhance / Normalize first to create snapshots.",
+                              "AI Metadata V8");
+        return;
+    }
+
+    // 3. 弹出多选对话框，让用户选要回滚哪些类型
+    std::vector<ai_metadata::OperationType> available_types(available_set.begin(), available_set.end());
+    Logger::instance().info("[Rollback] Available types count=" + std::to_string(available_types.size()));
+    // 排序：按枚举值固定顺序
+    std::sort(available_types.begin(), available_types.end(),
+        [](ai_metadata::OperationType a, ai_metadata::OperationType b) {
+            return static_cast<int>(a) < static_cast<int>(b);
+        });
+
+    std::vector<ai_metadata::OperationType> selected_types;
+    Logger::instance().info("[Rollback] Opening RollbackTypeDialog");
+    bool dialog_ok = RollbackTypeDialog::Show(core_api::get_main_window(),
+                                              available_types, type_counts, selected_types);
+    Logger::instance().info("[Rollback] Dialog returned " + std::string(dialog_ok ? "true" : "false") +
+        ", selected_types count=" + std::to_string(selected_types.size()) +
+        ", last_dialog_result=" + std::to_string((INT_PTR)RollbackTypeDialog::s_last_dialog_result) +
+        ", last_error_code=" + std::to_string(RollbackTypeDialog::s_last_error_code));
+    if (!dialog_ok) {
+        // 区分用户取消和对话框创建失败，提供更准确的反馈
+        if (RollbackTypeDialog::s_last_dialog_result == -1) {
+            std::string err_msg = "Failed to open rollback dialog (error code: " +
+                                  std::to_string(RollbackTypeDialog::s_last_error_code) + ").\n"
+                                  "This may indicate the dialog resource is missing or the DLL is outdated.\n"
+                                  "Please rebuild the plugin or check logs/core.log for details.";
+            popup_message::g_show(err_msg.c_str(), "AI Metadata V8 - Dialog Error");
+        } else {
+            popup_message::g_show("Rollback cancelled", "AI Metadata V8");
+        }
+        return;
+    }
+
+    if (selected_types.empty()) {
+        popup_message::g_show("No rollback type selected.", "AI Metadata V8");
+        return;
+    }
+
+    // 4. 按选中的类型逐类型回滚
+    // 每个类型独立处理：从该类型的快照中恢复对应字段
+    // 多类型合并到同一 info 上：依次应用各类型的字段恢复
+    int success_count = 0, no_backup_count = 0, fail_count = 0;
+    metadb_handle_list modified_tracks;
+    pfc::list_t<file_info_impl> modified_infos;
+
+    for (size_t i = 0; i < handles.size(); ++i) {
+        metadb_handle_ptr handle = handles[i];
+        const std::string& track_id = track_ids[i];
+
+        Logger::instance().info("[Rollback] Processing track " + std::to_string(i + 1) + "/" +
+            std::to_string(handles.size()) + ", track_id=" + track_id);
+
+        file_info_impl info;
+        if (!handle->get_info(info)) {
+            fail_count++;
+            Logger::instance().error("[Rollback] Failed to get info for track_id=" + track_id);
             continue;
         }
-        
-        const auto& snapshot = snapshot_opt.value();
-        file_info_impl info;
-        if (handle->get_info(info)) {
-            apply_snapshot_to_info(info, snapshot);
+
+        bool any_applied = false;
+        for (auto op_type : selected_types) {
+            auto snapshot_opt = g_ai_core->rollback_operation(track_id, op_type);
+            if (!snapshot_opt.has_value() || snapshot_opt->empty()) {
+                Logger::instance().info("[Rollback] No snapshot for op=" +
+                    std::string(ai_metadata::operation_type_to_string(op_type)) +
+                    ", track_id=" + track_id);
+                continue;
+            }
+
+            // 部分回滚：仅覆盖该操作影响的字段
+            auto fields = get_operation_fields(op_type);
+            apply_partial_snapshot_to_info(info, snapshot_opt.value(), fields);
+            any_applied = true;
+            Logger::instance().info("[Rollback] Applied op=" +
+                std::string(ai_metadata::operation_type_to_string(op_type)) +
+                ", track_id=" + track_id +
+                ", fields=" + std::to_string(snapshot_opt->size()));
+        }
+
+        if (any_applied) {
             modified_tracks.add_item(handle);
             modified_infos.add_item(info);
             success_count++;
-            Logger::instance().info("[Rollback] Successfully rolled back track_id=" + track_id + 
-                ", fields=" + std::to_string(snapshot.size()));
         } else {
-            fail_count++;
-            Logger::instance().error("[Rollback] Failed to get info for track_id=" + track_id);
+            no_backup_count++;
         }
     }
-    
+
     if (modified_tracks.get_count() > 0) {
-        Logger::instance().info("[Rollback] Writing to fb2k metadata database: " + 
+        Logger::instance().info("[Rollback] Writing to fb2k metadata database: " +
             std::to_string(modified_tracks.get_count()) + " tracks");
         batch_update_metadata(modified_tracks, modified_infos);
     }
-    
+
     Logger::instance().info("[Rollback] ===== END ROLLBACK =====");
-    Logger::instance().info("[Rollback] success=" + std::to_string(success_count) + 
+    Logger::instance().info("[Rollback] success=" + std::to_string(success_count) +
         ", no_backup=" + std::to_string(no_backup_count) + ", failed=" + std::to_string(fail_count));
-    
-    pfc::string8 msg;
-    msg << "Rollback complete:\n\nRolled back: " << success_count << "\nNo snapshot found: " << no_backup_count << "\nFailed: " << fail_count;
-    popup_message::g_show(msg, "Rollback to Initial");
+
+    // 汇总消息包含选中的类型
+    std::ostringstream oss;
+    oss << "Rollback complete.\n\nSelected types: ";
+    for (size_t i = 0; i < selected_types.size(); ++i) {
+        if (i > 0) oss << ", ";
+        oss << ai_metadata::operation_type_to_string(selected_types[i]);
+    }
+    oss << "\n\nRolled back: " << success_count
+        << "\nNo snapshot found: " << no_backup_count
+        << "\nFailed: " << fail_count;
+    popup_message::g_show(oss.str().c_str(), "Rollback");
 }
 
 void V8MenuHandler::show_cache_stats() {
@@ -1261,6 +1478,348 @@ void V8MenuHandler::clear_cache(metadb_handle_list_cref p_data) {
         oss << "Cleared " << deleted << " cache entries for " << track_ids.size() << " track(s)";
         popup_message::g_show(oss.str().c_str(), "AI Metadata V8");
     }
+}
+
+// ==================== Normalize ====================
+
+class NormalizeCallback : public threaded_process_callback {
+public:
+    NormalizeCallback(metadb_handle_list tracks, std::vector<TrackInput> inputs, NormalizeOptions options)
+        : m_tracks(tracks)
+        , m_inputs(std::move(inputs))
+        , m_options(options) {
+        // 读取每个 track 当前 field 的所有 values（multi-value 支持），
+        // 传给 Python 用于构造 track_updates。Python 端用 normalize_key 匹配，
+        // 避免 C++ 端因 Unicode 表示差异（NFC/NFD 韩文、尾部全角空格等）
+        // 导致 alias_to_canonical.find(val) 漏匹配。
+        std::string tag_field = m_options.field;
+        std::transform(tag_field.begin(), tag_field.end(), tag_field.begin(), ::toupper);
+        if (tag_field == "ALBUM_ARTIST") tag_field = "ALBUM ARTIST";
+
+        m_tag_field_upper = tag_field;
+        m_track_field_values.reserve(m_tracks.get_count());
+        for (size_t i = 0; i < m_tracks.get_count(); ++i) {
+            file_info_impl info;
+            std::vector<std::string> values;
+            if (m_tracks.get_item(i)->get_info(info)) {
+                const t_size value_count = info.meta_get_count_by_name(tag_field.c_str());
+                for (t_size v = 0; v < value_count; ++v) {
+                    const char* val = info.meta_get(tag_field.c_str(), v);
+                    if (val && strlen(val) > 0) {
+                        values.push_back(val);
+                    }
+                }
+            }
+            m_track_field_values.push_back(std::move(values));
+        }
+    }
+
+    void on_init(HWND p_wnd) override {
+        console::print("AI Metadata V8: Normalize started...");
+    }
+
+    void run(threaded_process_status& p_status, abort_callback& p_abort) override {
+        p_status.set_progress(0, 100);
+        p_status.set_title("Normalize - querying knowledge base + AI");
+
+        auto result = g_ai_core->normalize_sync(
+            m_inputs,
+            m_options,
+            m_track_field_values,
+            [this, &p_status, &p_abort](int current, int total, const std::string& message) {
+                if (p_abort.is_aborting()) return;
+                p_status.set_progress(current, total);
+                pfc::string8 title;
+                title << "Normalize - " << message.c_str();
+                p_status.set_title(title);
+            },
+            [&p_abort]() {
+                return p_abort.is_aborting();
+            }
+        );
+
+        if (p_abort.is_aborting()) return;
+
+        if (!result.has_value()) {
+            m_error_message = "Normalize failed: no result returned from AI core";
+            return;
+        }
+
+        m_result = std::move(result.value());
+    }
+
+    void on_done(HWND p_wnd, bool p_was_aborted) override {
+        if (p_was_aborted) {
+            popup_message::g_show("Normalize cancelled by user", "AI Metadata V8");
+            return;
+        }
+
+        if (!m_error_message.empty()) {
+            popup_message::g_show(m_error_message.c_str(), "AI Metadata V8");
+            return;
+        }
+
+        if (m_result.groups.empty() && m_result.uncertain.empty()) {
+            popup_message::g_show("No normalization suggestions returned.", "AI Metadata V8");
+            return;
+        }
+
+        // 显示确认对话框
+        std::vector<bool> selected_groups(m_result.groups.size(), true);
+        if (!DialogManager::ShowNormalizeConfirmDialog(
+                core_api::get_main_window(),
+                m_options.field,
+                m_result,
+                selected_groups)) {
+            popup_message::g_show("Normalize cancelled by user", "AI Metadata V8");
+            return;
+        }
+
+        // 构建用户选中 groups 的 alias → canonical 映射。
+        // 用户可能在 UI 把 uncertain 的 alias 手动加入 group，所以必须基于
+        // 用户确认后的 groups 重新构造映射，不能直接用 Python 的 track_updates.matched。
+        // 但 Python 的 track_updates.new_values 仍然有用（它用 normalize_key 匹配，
+        // 能处理 Unicode 表示差异如尾部全角空格、NFC/NFD 韩文等）。
+        //
+        // 策略：
+        //   - 对每个 track，优先用 Python 的 track_updates[i].new_values（若 matched 且
+        //     canonical 在选中集合中）。
+        //   - 若 track_updates[i].matched=false（Python 未识别，或值已是 canonical），
+        //     则用 alias_to_canonical 对 original_values 做精确匹配重新构造 new_values。
+        //     original_values 与 aliases 都是 Python 传过来的字符串，Unicode 表示一致，
+        //     精确匹配可靠。这样用户手动把 uncertain alias 加入 group 后也能正确写入。
+        std::map<std::string, std::string> alias_to_canonical;
+        std::set<std::string> selected_canonicals;
+        std::vector<AliasEntry> aliases_to_save;
+        for (size_t i = 0; i < m_result.groups.size(); ++i) {
+            if (!selected_groups[i]) continue;
+            const auto& g = m_result.groups[i];
+
+            selected_canonicals.insert(g.canonical_name);
+
+            // 对当前 group 的 aliases 去重（保留首次出现顺序，跳过空串）
+            std::vector<std::string> deduped_aliases;
+            std::set<std::string> seen_in_group;
+            for (const auto& alias : g.aliases) {
+                if (alias.empty()) continue;
+                if (seen_in_group.insert(alias).second) {
+                    deduped_aliases.push_back(alias);
+                }
+            }
+            for (const auto& alias : deduped_aliases) {
+                // alias 精确匹配：同一个 alias 可能出现在多个 group 中，
+                // 以首次出现的 group 为准（理论上不应重复）。
+                if (alias_to_canonical.find(alias) == alias_to_canonical.end()) {
+                    alias_to_canonical[alias] = g.canonical_name;
+                }
+                AliasEntry ae;
+                ae.field = m_options.field;
+                ae.alias_name = alias;
+                ae.canonical_name = g.canonical_name;
+                ae.source = "ai";
+                ae.confidence = g.confidence;
+                ae.confirmed = true;
+                ae.reason = g.reason;
+                aliases_to_save.push_back(std::move(ae));
+            }
+        }
+
+        if (selected_canonicals.empty()) {
+            popup_message::g_show("No groups selected. Nothing to apply.", "AI Metadata V8");
+            return;
+        }
+
+        // 写入 SQLite 知识库
+        g_ai_core->batch_upsert_aliases(aliases_to_save);
+
+        // 应用到 Tag。
+        // 对每个 track：优先用 Python 的 track_updates.new_values（若 matched 且 canonical 选中），
+        // 否则用 alias_to_canonical 对 original_values 精确匹配重新构造 new_values。
+        const std::string& tag_field = m_tag_field_upper;
+        int applied = 0;
+        metadb_handle_list modified_tracks;
+        pfc::list_t<file_info_impl> modified_infos;
+
+        for (const auto& update : m_result.track_updates) {
+            if (update.track_index < 0 ||
+                (size_t)update.track_index >= m_tracks.get_count()) {
+                continue;
+            }
+
+            // 决定该 track 的 new_values：
+            //   - 若 Python 已 matched 且 canonical 在选中集合 → 直接用 new_values
+            //   - 否则 → 用 alias_to_canonical 对 original_values 精确匹配重新构造
+            std::vector<std::string> new_values;
+            bool any_matched = false;
+            std::string matched_canonical;
+
+            bool use_python = update.matched &&
+                              !update.canonical_name.empty() &&
+                              selected_canonicals.find(update.canonical_name) != selected_canonicals.end();
+
+            if (use_python) {
+                new_values = update.new_values;
+                matched_canonical = update.canonical_name;
+                any_matched = true;
+            } else {
+                // 用户可能在 UI 把 uncertain 的 alias 加入 group，
+                // 用 alias_to_canonical 对 original_values 精确匹配重新构造。
+                std::set<std::string> seen_canonicals;
+                for (const auto& val : update.original_values) {
+                    auto it = alias_to_canonical.find(val);
+                    if (it != alias_to_canonical.end() &&
+                        selected_canonicals.find(it->second) != selected_canonicals.end()) {
+                        if (seen_canonicals.insert(it->second).second) {
+                            new_values.push_back(it->second);
+                        }
+                        if (matched_canonical.empty()) matched_canonical = it->second;
+                        any_matched = true;
+                    } else {
+                        new_values.push_back(val);
+                    }
+                }
+            }
+
+            if (!any_matched) continue;
+
+            // 值未变化则跳过（已是 canonical，无需写入）
+            bool changed = new_values != update.original_values;
+            if (!changed) {
+                Logger::instance().info(
+                    "[Normalize] Skipping track_id=" + update.track_id +
+                    " (values already canonical, no change needed)");
+                continue;
+            }
+
+            metadb_handle_ptr handle = m_tracks.get_item(update.track_index);
+            file_info_impl info;
+            if (!handle->get_info(info)) continue;
+
+            // 校验：当前 tag 的 values 数量应与 original_values 一致。
+            const t_size cur_count = info.meta_get_count_by_name(tag_field.c_str());
+            if (cur_count != update.original_values.size()) {
+                Logger::instance().warning(
+                    "[Normalize] Value count mismatch for track_id=" + update.track_id +
+                    ", cur=" + std::to_string(cur_count) +
+                    ", original=" + std::to_string(update.original_values.size()) +
+                    ", skipping");
+                continue;
+            }
+
+            Logger::instance().info(
+                "[Normalize] Applying track_update track_id=" + update.track_id +
+                ", canonical='" + matched_canonical + "'" +
+                ", new_values_count=" + std::to_string(new_values.size()) +
+                ", source=" + (use_python ? "python" : "cpp_rematch"));
+
+            // 备份规范化前的状态，支持回滚（Normalize 类型）
+            std::map<std::string, std::string> snapshot = extract_full_snapshot(info);
+            Logger::instance().info("[Normalize] Saving Normalize snapshot for track_id=" + update.track_id);
+            bool snap_ok = g_ai_core->ensure_operation_snapshot(
+                update.track_id,
+                ai_metadata::OperationType::Normalize,
+                snapshot
+            );
+            Logger::instance().info("[Normalize] ensure_operation_snapshot(Normalize) returned " +
+                std::string(snap_ok ? "true" : "false") + ", track_id=" + update.track_id);
+
+            // 重新设置字段：先移除所有 values，再按 new_values 逐个添加（保留 multi-value 结构）
+            info.meta_remove_field(tag_field.c_str());
+            for (const auto& v : new_values) {
+                info.meta_add(tag_field.c_str(), v.c_str());
+            }
+            modified_tracks.add_item(handle);
+            modified_infos.add_item(info);
+            applied++;
+        }
+
+        if (applied > 0) {
+            batch_update_metadata(modified_tracks, modified_infos);
+            std::ostringstream oss;
+            oss << "Normalize complete: " << applied << " track(s) updated for field '" << m_options.field << "'.";
+            console::print(oss.str().c_str());
+            popup_message::g_show(oss.str().c_str(), "AI Metadata V8");
+        } else {
+            popup_message::g_show("No tracks needed normalization (all values already canonical or no matching alias).",
+                                  "AI Metadata V8");
+        }
+    }
+
+private:
+    metadb_handle_list m_tracks;
+    std::vector<TrackInput> m_inputs;
+    NormalizeOptions m_options;
+    std::string m_tag_field_upper;                          ///< 目标 Tag 字段名（大写）
+    std::vector<std::vector<std::string>> m_track_field_values;  ///< 每个 track 当前 field 的所有 values
+    NormalizeResult m_result;
+    std::string m_error_message;
+};
+
+void V8MenuHandler::normalize_metadata(metadb_handle_list_cref p_data) {
+    Logger::instance().info("[V8MenuHandler] normalize_metadata: CALLED, track count = " +
+                            std::to_string(p_data.get_count()));
+    console::print("AI Metadata V8: normalize_metadata called");
+
+    if (!ensure_ai_core_initialized()) {
+        Logger::instance().error("[V8MenuHandler] normalize_metadata: ensure_ai_core_initialized FAILED");
+        popup_message::g_show("Failed to initialize AI core", "AI Metadata V8");
+        return;
+    }
+
+    if (p_data.get_count() == 0) {
+        popup_message::g_show("No tracks selected.", "AI Metadata V8");
+        return;
+    }
+
+    // 字段选择对话框（多选）
+    std::vector<std::string> selected_fields;
+    if (!DialogManager::ShowNormalizeFieldDialog(
+            core_api::get_main_window(), selected_fields)) {
+        return;
+    }
+    if (selected_fields.empty()) {
+        popup_message::g_show("No fields selected.", "AI Metadata V8");
+        return;
+    }
+
+    // 提取 TrackInput
+    std::vector<TrackInput> inputs;
+    for (size_t i = 0; i < p_data.get_count(); ++i) {
+        file_info_impl info;
+        if (p_data.get_item(i)->get_info(info)) {
+            TrackInput input;
+            const char* path = p_data.get_item(i)->get_path();
+            uint32_t subsong = p_data.get_item(i)->get_subsong_index();
+            t_filestats stats = p_data.get_item(i)->get_filestats();
+            uint64_t file_size = stats.m_size;
+            input.track_id = CacheLayer::generate_track_uid(path ? path : "", subsong, file_size);
+            input.file_path = path ? path : "";
+            input.subsong_index = subsong;
+            input.title = info.meta_get("TITLE", 0) ? info.meta_get("TITLE", 0) : "";
+            input.artist = info.meta_get("ARTIST", 0) ? info.meta_get("ARTIST", 0) : "";
+            input.album = info.meta_get("ALBUM", 0) ? info.meta_get("ALBUM", 0) : "";
+            input.album_artist = info.meta_get("ALBUM ARTIST", 0) ? info.meta_get("ALBUM ARTIST", 0) : "";
+            input.genre = info.meta_get("GENRE", 0) ? info.meta_get("GENRE", 0) : "";
+            input.label = info.meta_get("LABEL", 0) ? info.meta_get("LABEL", 0) : "";
+            input.composer = info.meta_get("COMPOSER", 0) ? info.meta_get("COMPOSER", 0) : "";
+            inputs.push_back(input);
+        }
+    }
+
+    if (inputs.empty()) {
+        popup_message::g_show("Failed to read track metadata.", "AI Metadata V8");
+        return;
+    }
+
+    // 当前阶段：仅处理第一个选中字段（通常为 artist）；多字段支持留待后续扩展
+    NormalizeOptions options;
+    options.field = selected_fields[0];
+
+    service_ptr_t<NormalizeCallback> callback =
+        new service_impl_t<NormalizeCallback>(p_data, std::move(inputs), options);
+    threaded_process::g_run_modeless(callback,
+        threaded_process::flag_show_progress | threaded_process::flag_show_abort,
+        core_api::get_main_window(), "Normalize Metadata");
 }
 
 static contextmenu_item_factory_t<V8MenuHandler> g_v8_menu_handler_factory;

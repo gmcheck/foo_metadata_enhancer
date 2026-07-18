@@ -663,14 +663,92 @@ class MusicBrainzAdapter(DataSourceAdapter):
                 except Exception as e:
                     logger.error(f"MusicBrainz: Error parsing recording: {e}")
                     continue
-            
+
+            # 为排名靠前的候选补全 genre（recording 搜索接口不返回 genres/tags，
+            # 需要按 mbid 单独 lookup）。仅对前 N 个候选做 lookup，控制 API 调用量。
+            self._populate_genres_for_top_candidates(candidates, top_n=3)
+
             logger.debug(f"MusicBrainz: Returning {len(candidates)} candidates")
             return candidates
-            
+
         except Exception as e:
             logger.error(f"MusicBrainz: search_candidates error: {e}")
             return []
-    
+
+    def _populate_genres_for_top_candidates(self, candidates: List[Candidate],
+                                              top_n: int = 3) -> None:
+        """为前 N 个候选补全 genre 字段
+
+        MusicBrainz recording 搜索接口不返回 genres/tags，需要按 mbid 单独 lookup。
+        仅对前 N 个候选做 lookup，控制 API 调用量。
+
+        Args:
+            candidates: 候选列表（已按 final_score 排序）
+            top_n: 处理前 N 个候选
+        """
+        if not candidates:
+            return
+
+        for candidate in candidates[:top_n]:
+            if not candidate.musicbrainz_id or candidate.genre:
+                continue
+            genre = self._lookup_recording_genre(candidate.musicbrainz_id)
+            if genre:
+                candidate.genre = genre
+                logger.debug(f"MusicBrainz: genre='{genre}' for mbid={candidate.musicbrainz_id}")
+
+    def _lookup_recording_genre(self, mbid: str) -> str:
+        """查询 recording 的 genre（按 vote 数降序取最高的）
+
+        MusicBrainz lookup 接口: /ws/2/recording/{mbid}?inc=genres+tags&fmt=json
+        优先取 genres（用户投票的官方分类），其次取 tags。
+
+        Args:
+            mbid: MusicBrainz recording ID
+
+        Returns:
+            str: 最高票数的 genre 名（小写），无则返回空字符串
+        """
+        if not mbid:
+            return ""
+
+        url = f"https://musicbrainz.org/ws/2/recording/{mbid}"
+        params = {
+            "fmt": "json",
+            "inc": "genres+tags"
+        }
+
+        try:
+            self._rate_limit_wait()
+            self._last_request_time = time.time()
+            response = self._session.get(url, params=params, timeout=self._timeout)
+            if response.status_code != 200:
+                logger.debug(f"MusicBrainz: genre lookup HTTP {response.status_code} for mbid={mbid}")
+                return ""
+            data = response.json()
+
+            # genres 字段：[{name, count, ...}]，count 为投票数
+            genres = data.get("genres", [])
+            if genres:
+                # 按 count 降序排序，取最高
+                genres_sorted = sorted(genres, key=lambda g: g.get("count", 0), reverse=True)
+                top_genre = genres_sorted[0].get("name", "")
+                if top_genre:
+                    return top_genre.lower()
+
+            # fallback: tags 字段（用户自由标签，无投票权重时也参考）
+            tags = data.get("tags", [])
+            if tags:
+                tags_sorted = sorted(tags, key=lambda t: t.get("count", 0), reverse=True)
+                top_tag = tags_sorted[0].get("name", "")
+                if top_tag:
+                    return top_tag.lower()
+
+            return ""
+        except Exception as e:
+            logger.debug(f"MusicBrainz: genre lookup failed for mbid={mbid}: {e}")
+            return ""
+
     def get_release_info(self, release_id: str) -> Optional[ReleaseInfo]:
         """获取发行信息
         

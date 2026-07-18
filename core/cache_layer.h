@@ -35,12 +35,21 @@ struct Stage2CacheEntry {
     std::string album_zh;
     std::string artist_zh;
     float translation_confidence = 0.0f;
-    std::string genre_value;
-    float genre_confidence = 0.0f;
-    std::string edition_value;
-    float edition_confidence = 0.0f;
     std::string error_code;
     std::string error_message;
+};
+
+/**
+ * @brief Normalize 知识库条目：alias → canonical 映射
+ */
+struct AliasEntry {
+    std::string field;           // "artist" | "album_artist" | "album" | "genre" | ...
+    std::string alias_name;      // 原始写法
+    std::string canonical_name;  // 标准写法
+    std::string source;          // "ai" | "manual" | "imported"
+    float confidence = 1.0f;     // AI 置信度
+    bool confirmed = true;       // 是否用户确认
+    std::string reason;          // AI 给出的归并理由
 };
 
 /**
@@ -147,6 +156,31 @@ public:
      * @return 如果数据库连接有效返回true
      */
     bool is_valid() const { return db_ != nullptr; }
+
+    // ==================== Normalize Alias 知识库 ====================
+
+    /**
+     * @brief 批量查询 alias → canonical 映射
+     * @param field 目标字段（artist/album_artist/album/...）
+     * @param alias_names 待查的 alias 列表
+     * @return 命中的 AliasEntry 列表
+     */
+    std::vector<AliasEntry> get_aliases(
+        const std::string& field,
+        const std::vector<std::string>& alias_names
+    );
+
+    /**
+     * @brief 写入或更新单条 alias 映射
+     * @return 成功返回 true
+     */
+    bool upsert_alias(const AliasEntry& entry);
+
+    /**
+     * @brief 批量写入 alias 映射（事务）
+     * @return 全部成功返回 true
+     */
+    bool batch_upsert_aliases(const std::vector<AliasEntry>& entries);
     
 private:
     /**

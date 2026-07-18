@@ -139,7 +139,11 @@ class BaseAIProvider(ABC):
     
     定义所有AI提供商必须实现的接口。
     """
-    
+
+    # 是否支持联网搜索（用于 normalize 等需要外部证据的场景）
+    # 子类按需 override 为 True 并实现 chat_completion_json_with_web_search
+    supports_web_search: bool = False
+
     def __init__(self, config: ProviderConfig):
         """初始化提供商
         
@@ -184,6 +188,27 @@ class BaseAIProvider(ABC):
             AIResponse: AI响应对象（内容应为有效JSON）
         """
         pass
+
+    def chat_completion_json_with_web_search(self, messages: List[Dict[str, str]],
+                                             temperature: float = 0.0,
+                                             max_tokens: Optional[int] = None,
+                                             **kwargs) -> AIResponse:
+        """发送期望JSON响应的聊天完成请求（带联网搜索能力）
+
+        默认实现：fallback 到无联网的 chat_completion_json。
+        支持 web_search 的 provider（如 OpenAI Responses API）override 此方法。
+
+        Args:
+            messages: 消息列表
+            temperature: 采样温度
+            max_tokens: 最大生成令牌数
+            **kwargs: 额外参数
+
+        Returns:
+            AIResponse: AI响应对象（内容应为有效JSON）
+        """
+        return self.chat_completion_json(messages, temperature=temperature,
+                                         max_tokens=max_tokens, **kwargs)
     
     def get_model(self) -> str:
         """获取当前模型名称（最高优先级）

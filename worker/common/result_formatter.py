@@ -9,8 +9,7 @@ import logging
 from typing import Dict, Any, List, Optional
 from dataclasses import dataclass, field, asdict
 
-from data_sources.base import Candidate, QueryInput, DataSourceType
-from core.resolver import FinalResult
+from data_sources.base import Candidate, QueryInput, DataSourceType, FinalResult
 
 logger = logging.getLogger(__name__)
 

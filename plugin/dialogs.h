@@ -2,6 +2,7 @@
 
 #include <foobar2000/SDK/foobar2000.h>
 #include "../include/types.h"
+#include "../include/backup_manager.h"
 #include <string>
 #include <functional>
 
@@ -53,6 +54,16 @@ public:
                                           std::vector<bool>& selected,
                                           const EnhancementOptions& options,
                                           const std::vector<TrackInput>& original_inputs);
+
+    // Normalize: 字段选择对话框（多选，弹窗点选）
+    static bool ShowNormalizeFieldDialog(HWND parent, std::vector<std::string>& selected_fields);
+
+    // Normalize: 确认对话框（显示 groups + uncertain，用户勾选要应用的 groups）
+    // result 为非 const：支持双击编辑 group（修改 canonical_name / aliases）
+    static bool ShowNormalizeConfirmDialog(HWND parent,
+                                            const std::string& field,
+                                            NormalizeResult& result,
+                                            std::vector<bool>& selected_groups);
 };
 
 class BatchSettingsDialog {
@@ -191,6 +202,92 @@ public:
     static void OnSelectNone(HWND wnd);
     static void OnSelectSuccess(HWND wnd);
     static void OnEditItemAt(HWND wnd, int item_index, int sub_item);
+    static void OnOK(HWND wnd);
+    static void OnCancel(HWND wnd);
+};
+
+// Normalize 字段选择对话框
+class NormalizeFieldDialog {
+public:
+    static INT_PTR CALLBACK DlgProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp);
+
+    static std::vector<std::string>* s_selected_fields;
+    static bool s_confirmed;
+
+    static void DoInitDialog(HWND wnd);
+    static void OnOK(HWND wnd);
+    static void OnCancel(HWND wnd);
+};
+
+// Normalize 确认对话框
+class NormalizeConfirmDialog {
+public:
+    static INT_PTR CALLBACK DlgProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp);
+
+    static std::string s_field;
+    static NormalizeResult* s_result;
+    static std::vector<bool>* s_selected_groups;
+    static bool s_confirmed;
+
+    static void DoInitDialog(HWND wnd);
+    static void PopulateListView(HWND wnd);
+    static void OnSelectAll(HWND wnd);
+    static void OnSelectNone(HWND wnd);
+    static void OnEditGroupAt(HWND wnd, int item_index);
+    static void OnOK(HWND wnd);
+    static void OnCancel(HWND wnd);
+};
+
+// Normalize 单个 group 编辑对话框（修改 canonical_name + aliases，查看 reason）
+class NormalizeEditDialog {
+public:
+    static INT_PTR CALLBACK DlgProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp);
+
+    static std::string s_canonical_name;
+    static std::vector<std::string> s_aliases;
+    static std::string s_reason;        // 只读显示，让用户能看完整 reason
+    static bool s_confirmed;
+
+    static void DoInitDialog(HWND wnd);
+    static void OnOK(HWND wnd);
+    static void OnCancel(HWND wnd);
+
+    // 弹出编辑对话框，修改 canonical 和 aliases（reason 只读显示）
+    static bool Show(HWND parent,
+                     const std::string& canonical_name,
+                     const std::vector<std::string>& aliases,
+                     const std::string& reason,
+                     std::string& out_canonical,
+                     std::vector<std::string>& out_aliases);
+};
+
+// 回滚类型选择对话框
+// 用户勾选要回滚的操作类型（刮削 / 翻译 / 歌手规范化），
+// 只有"该类型在所选 tracks 中有快照"的项才显示并允许勾选
+class RollbackTypeDialog {
+public:
+    static INT_PTR CALLBACK DlgProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp);
+
+    // 输入：available_types - 所选 tracks 中存在的操作类型集合（已去重）
+    //       type_counts - 每个类型对应的 track 数量（供 UI 显示）
+    // 输出：selected_types - 用户勾选的类型
+    // 返回：true=用户确认；false=用户取消或对话框创建失败
+    //       若返回 false，可检查 s_last_error_code 判断是取消还是失败
+    static bool Show(HWND parent,
+                     const std::vector<ai_metadata::OperationType>& available_types,
+                     const std::map<ai_metadata::OperationType, int>& type_counts,
+                     std::vector<ai_metadata::OperationType>& selected_types);
+
+    static std::vector<ai_metadata::OperationType> s_available_types;
+    static std::map<ai_metadata::OperationType, int> s_type_counts;
+    static std::vector<bool> s_check_states;
+    static bool s_confirmed;
+    // 记录 DialogBoxParam 的返回值：-1 表示创建失败，IDOK/IDCANCEL 表示正常关闭
+    static INT_PTR s_last_dialog_result;
+    // 记录创建失败时的 GetLastError（仅 s_last_dialog_result == -1 时有效）
+    static DWORD s_last_error_code;
+
+    static void DoInitDialog(HWND wnd);
     static void OnOK(HWND wnd);
     static void OnCancel(HWND wnd);
 };

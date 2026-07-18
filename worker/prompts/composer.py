@@ -94,18 +94,21 @@ class PromptComposer:
         return get_provider_profile(self.provider_name).get("extra_instructions", "")
 
     # =========================================================================
-    # Stage 2：翻译 / 流派 / 版本
+    # Stage 2：翻译（仅翻译，不再分类/识别版本）
     # =========================================================================
 
     def build_stage2_system_prompt(self) -> str:
-        """构建 Stage2 系统提示（翻译/流派/版本）
+        """构建 Stage2 系统提示（仅翻译）
 
         组装顺序：
         Layer 1（角色 + JSON 契约）
           + Provider Profile
-          + Layer 2（流派表 + 版本表 + 翻译平台清单）
-          + Layer 3（翻译规则 + 流派语言 + 自定义 hints）
+          + Layer 2（翻译平台清单）
+          + Layer 3（翻译规则 + 自定义 hints）
           + Layer 1（输出 schema，尾部强化）
+
+        注意：自 V8.2 起，genre 已移至 Stage1（MusicBrainz 抓取），
+        edition 已移除。Stage2 仅保留翻译能力（基于已有元数据生成新价值）。
         """
         parts: List[str] = [
             # Layer 1：角色 + JSON 契约
@@ -114,12 +117,10 @@ class PromptComposer:
             SYSTEM_CORE_JSON_REQUIREMENTS,
             # Provider Profile
             self.provider_extra_instructions,
-            # Layer 2：领域知识（MD 文件热重载，缺失时用默认值）
-            self.dk_loader.get_genre_categories(),
-            self.dk_loader.get_edition_types(),
+            # Layer 2：领域知识（仅保留翻译平台清单）
+            self.dk_loader.get_translation_platforms(),
             # Layer 3：用户偏好
             self._build_translation_rules(),
-            self._build_genre_language_rule(),
             self._build_custom_hints(),
             # Layer 1：尾部强化输出契约
             STAGE2_OUTPUT_SCHEMA,
@@ -127,17 +128,13 @@ class PromptComposer:
         return "\n\n".join(p for p in parts if p and p.strip())
 
     def _build_stage2_task_description(self) -> str:
-        """构建 Stage2 任务描述
+        """构建 Stage2 任务描述（仅翻译）
 
         注：具体翻译哪些字段由运行时 EnhancementOptions 在 user message 中指定，
         system prompt 仅描述任务能力，不重复声明字段开关。
         """
-        tasks = [
-            "1. Chinese translations for title, album, and artist (as requested in the user message)",
-            "2. Genre classification with confidence",
-            '3. Edition identification (e.g., "Original Release", "Remastered", "Live", "Demo", etc.)',
-        ]
-        return "Analyze the provided tracks and return for each:\n" + "\n".join(tasks)
+        return ("Analyze the provided tracks and return Chinese translations "
+                "for title, album, and artist (as requested in the user message).")
 
     def _build_translation_rules(self) -> str:
         """构建翻译规则（基于用户偏好动态生成）"""
@@ -165,27 +162,32 @@ class PromptComposer:
 
         # 字段开关由运行时 EnhancementOptions 控制，system prompt 不重复声明
 
-        # 不确定时保留原文
+        # 不确定时仍尝试翻译（避免空结果）
         if prefs.keep_original_when_uncertain:
             rules.append("")
-            rules.append("If uncertain about a translation, leave the field empty rather than guessing.")
+            rules.append("If uncertain about a translation, still provide your best guess rather than")
+            rules.append("leaving the field empty. Only leave empty if the original is already Chinese.")
 
         # 置信度阈值
         min_conf = prefs.min_translation_confidence
         rules.append("")
-        rules.append(f"translation_confidence: 0.0-1.0. Use 0.0 if no translation needed (already Chinese).")
-        rules.append(f"Treat confidence below {min_conf} as low confidence.")
+        rules.append("TRANSLATION IS MANDATORY for non-Chinese content:")
+        rules.append("- English/Japanese/Korean/other non-Chinese titles MUST be translated")
+        rules.append("- Provide your best Chinese translation for every non-Chinese field")
+        rules.append("- Set translation_confidence to 0.5-1.0 based on your confidence")
+        rules.append("")
+        rules.append("No-translation case (RARE):")
+        rules.append("- ONLY leave *_zh empty when the original is ALREADY Chinese characters")
+        rules.append("- For already-Chinese content, set translation_confidence to 0.0")
+        rules.append("- Do NOT skip translation for English or other non-Chinese content")
+        rules.append("")
+        rules.append(f"translation_confidence: 0.0-1.0")
+        rules.append(f"  - 0.0: only for already-Chinese content (no translation needed)")
+        rules.append(f"  - 0.3-0.5: low confidence translation (below {min_conf})")
+        rules.append(f"  - 0.5-0.7: moderate confidence")
+        rules.append(f"  - 0.7-1.0: high confidence")
 
         return "\n".join(rules)
-
-    def _build_genre_language_rule(self) -> str:
-        """构建流派语言规则"""
-        lang = self.user_prefs.genre_language
-        if lang == "chinese":
-            return "Genre Language Rule:\nReturn genre in Chinese (e.g., 摇滚, 流行, 古典, 爵士)."
-        if lang == "bilingual":
-            return "Genre Language Rule:\nReturn genre as 'English (中文)' format (e.g., 'Rock (摇滚)', 'Pop (流行)')."
-        return "Genre Language Rule:\nReturn genre in English (e.g., Rock, Pop, Classical, Jazz)."
 
     def _build_custom_hints(self) -> str:
         """构建自定义翻译 hints 与附加指令"""

@@ -7,19 +7,32 @@ A foobar2000 plugin that uses AI to automatically analyze, scrape, and enhance m
 
 ## Features
 
-- **Metadata Scraping** - Automatically fetches metadata from MusicBrainz, Discogs, and AI
-- **Metadata Enhancement** - AI-powered translation, genre classification, and edition identification
+The plugin is organized around three non-overlapping functions (V8.2 boundary):
+
+- **Scrape** - Fetch data the local file doesn't have, from external sources (facts acquisition)
+  - Sources: MusicBrainz (authoritative) → Discogs (supplemental) → AI (fallback)
+  - Outputs: title / artist / album / year / genre / composer / ... / musicbrainz_id
+  - V8.2: genre is now sourced from MusicBrainz recording details (previously an AI classification task in Enhance)
+- **Enhancer** - Derive new value from existing metadata (no new facts fetched)
+  - Currently: Chinese translation of title / album / artist
+  - V8.2: edition identification removed (AI inference was unreliable); genre no longer produced here
+- **Normalize** - Map existing tags to standard tags (consistency)
+  - Currently: artist name normalization (alias → canonical)
+  - Future: genre mapping, etc.
+
+Additional capabilities:
+
 - **One-Click Processing** - Run Scrape + Enhance in a single step with auto-chaining
-- **Multi-source Support** - MusicBrainz (authoritative) → Discogs (supplemental) → AI (fallback)
 - **Smart Caching** - SQLite-based cache to reduce redundant API calls
-- **Backup & Rollback** - Automatic backup before modifications with rollback support
+- **Multi-Operation Rollback** - Independent snapshots per operation type (Scrape / Translate / Normalize); rollback only the selected operation's affected fields
+- **Alias Deduplication** - Double deduplication (after user edit + before apply) to prevent duplicate aliases
 - **Multiple AI Providers** - Supports OpenRouter, Zhipu AI, Google Gemini, DeepSeek, and Ollama (local)
 - **Configurable Translation Style** - Three translation strategies: official / literal / semantic
-- **UTF-8 Support** - Full Chinese input support in custom hints and advanced instructions
+- **Manual Confirmation for Uncertain Results** - When web search is unavailable (e.g., Zhipu Chat), uncertain results are saved and the user is prompted to confirm
 
 ## Requirements
 
-- Register and get API KEY from ZHIPU AI (https://bigmodel.cn/console/overview).This is a free ai service for some models now.
+- Register and get API KEY from AI (ZHIPU AI is recommended,this is a free ai service for some models now.Ref to https://bigmodel.cn/console/overview).
 - foobar2000 2.0 or later
 - Windows 10/11
 - Python 3.11+ (required)
@@ -45,53 +58,6 @@ A foobar2000 plugin that uses AI to automatically analyze, scrape, and enhance m
 3. Review the results and select fields to write
 4. Click **Apply Selected**
 
-## Menu Commands
-
-| Command | Description |
-|---------|-------------|
-| Scrape Metadata | Fetch basic metadata from MusicBrainz/Discogs/AI |
-| Enhance Metadata | AI-powered translation, genre classification, edition identification |
-| Scrape & Enhance (Auto) | Run Scrape then Enhance automatically in one step |
-| Rollback to Initial | Restore tracks to original state before AI processing |
-| Cache Statistics | View cache hit rate and database size |
-| Clear Cache | Clear cached metadata for selected tracks or all |
-
-## Configuration
-
-Access settings via: **File** → **Preferences** → **AI Metadata**
-
-### General Settings
-
-| Setting | Description |
-|---------|-------------|
-| Provider | AI provider (OpenRouter, Zhipu, Gemini, Ollama) |
-| API Key | Your API key for the selected provider |
-| Model | AI model to use |
-| Use Env Var | Use environment variable for API key |
-
-### Python Settings
-
-| Setting | Description |
-|---------|-------------|
-| Python Path | Path to Python executable (auto-detected) |
-| Auto-install Packages | Automatically install required Python packages.Only checked at the first time, otherwise unchecked. |
-
-### Cache Settings
-
-| Setting | Description |
-|---------|-------------|
-| Enable Cache | Enable/disable caching |
-| Expiration (days) | Cache entry expiration time |
-| Max Size (MB) | Maximum cache database size |
-| Auto Cleanup | Automatically clean expired entries |
-
-### Advanced Settings
-
-| Setting | Description | Default |
-|---------|-------------|---------|
-| Task Queue Batch Size | Number of tracks per batch for Stage 1 | 50 |
-| AI Batch Size | Number of tracks per batch for Stage 2 | 10 |
-| Per-Track Timeout (sec) | Timeout per track | 60 |
 
 ## Supported Tags
 
@@ -108,16 +74,27 @@ Access settings via: **File** → **Preferences** → **AI Metadata**
 | COMPOSER | Composer |
 | LYRICIST | Lyricist |
 | LABEL | Record label |
+| GENRE | Genre (from MusicBrainz recording details, V8.2) |
 
 ### Enhance Output
 
 | Tag | Description |
 |-----|-------------|
-| GENRE | AI-classified genre |
-| EDITION | AI-identified edition |
 | TITLE_ZH | Chinese translation of title |
 | ALBUM_ZH | Chinese translation of album |
 | ARTIST_ZH | Chinese translation of artist |
+
+> Note: EDITION tag is no longer produced (V8.2 removed AI edition identification as unreliable).
+> GENRE moved from Enhance to Scrape (V8.2) — it is now a fact fetched from MusicBrainz, not an AI inference.
+
+### Normalize Output
+
+| Tag | Description |
+|-----|-------------|
+| ARTIST | Normalized artist name (alias → canonical) |
+| ALBUM ARTIST | Normalized album artist |
+| (future) | Genre mapping, etc. |
+
 
 ## Building from Source
 
@@ -147,8 +124,7 @@ copy worker\config.yaml.template worker\config.yaml
 
 ```bash
 # Configure (with auto-deploy to local foobar2000)
-Remove-Item -Recurse -Force out/build; cmake -B out/build -G "Visual Studio 18 2026" -A x64 ^
-    -DFOOBAR_DEV_DIR="C:/path/to/your/foobar2000"
+Remove-Item -Recurse -Force out/build; cmake -B out/build -G "Visual Studio 18 2026" -A x64 -DFOOBAR_DEV_DIR="D:/Programs/foobar2000_asion"
 
 # Or configure without auto-deploy (for packaging only)
 Remove-Item -Recurse -Force out/build; cmake -B out/build -G "Visual Studio 18 2026" -A x64
@@ -198,45 +174,6 @@ foobar2000/
 ```
 
 
-
-## Project Structure
-
-```
-foo_metadata_enhancer/
-├── core/                   # C++ core library
-│   ├── ai_core.cpp         # Main AI processing logic
-│   ├── cache_layer.cpp     # SQLite cache implementation
-│   ├── task_queue.cpp      # Batch processing queue
-│   └── logger.cpp          # Logging system
-├── plugin/                 # foobar2000 plugin
-│   ├── menu_handler.cpp    # Context menu implementation
-│   ├── preferences_page.cpp# Settings UI
-│   └── confirm_dialog.cpp  # Result confirmation dialog
-├── worker/                 # Python worker process
-│   ├── ai_worker.py        # Worker entry point
-│   ├── core/               # Core processing modules
-│   │   ├── stage1_processor.py
-│   │   ├── stage2_processor.py
-│   │   ├── aggregator.py
-│   │   └── resolver.py
-│   ├── ai/                 # AI provider implementations
-│   │   ├── adapter.py
-│   │   ├── ai_data_source.py
-│   │   └── providers/
-│   ├── data_sources/       # MusicBrainz/Discogs adapters
-│   │   ├── manager.py
-│   │   ├── musicbrainz_adapter.py
-│   │   └── discogs_adapter.py
-│   ├── fallback/           # Fallback processing
-│   ├── prompts/            # Prompt templates
-│   └── common/             # Shared utilities
-│       ├── models.py
-│       ├── config_manager.py
-│       └── text_utils.py
-├── include/                # Header files
-└── docs/                   # Documentation
-```
-
 ## Troubleshooting
 
 ### Plugin not appearing in menu
@@ -260,6 +197,20 @@ foo_metadata_enhancer/
 ### Tags not writing to CUE files
 
 Install and configure the External Tags plugin as described in Requirements.
+
+### Rollback dialog fails to open (error code: 1814)
+
+`ERROR_RESOURCE_NAME_NOT_FOUND (1814)` means the rollback dialog resource is missing from the DLL. Causes and fixes:
+
+1. **Stale `.res` file** — delete `out/build/foo_metadata_enhancer.dir/<Config>/foo_metadata_enhancer.res` and rebuild.
+2. **UTF-8 Chinese comment in `plugin/resource.h` breaking the RC compiler** — the RC compiler parses `.h` files as ANSI/GBK by default. A line comment ending with a multi-byte UTF-8 character (e.g. `// 回滚类型选择对话框`, whose last byte `0x86` is a GBK lead byte) can swallow the following newline, causing the next `#define IDD_...` to be silently dropped. Keep comments in `resource.h` ASCII-only, or save the file as UTF-16 LE with BOM.
+3. **Outdated DLL deployed** — after rebuilding, copy `out/build/Release/foo_metadata_enhancer.dll` to foobar2000's `components/` directory (close foobar2000 first if the file is locked).
+
+Verify the resource is present as a numeric ID (not a string name) by enumerating the DLL's resources; `IDD_ROLLBACK_TYPE_SELECT` must appear as `type=5 name=num:3073`.
+
+### Enhancer confirmation dialog shows blank cells for Chinese tracks
+
+When the original metadata is already in Chinese, the AI correctly returns empty `*_zh` fields (no translation needed). The confirmation dialog now falls back to displaying the original value in the Title ZH / Album ZH / Artist ZH columns (same behavior as the Scrape confirmation dialog), instead of showing empty cells. The `Confidence` column displays `N/A (Chinese)` and `Success` displays `Skipped`; these rows are unchecked by default and will not write any tag unless you manually check them.
 
 ## License
 

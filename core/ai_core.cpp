@@ -10,6 +10,7 @@
 #include <thread>
 #include <fstream>
 #include <chrono>
+#include <set>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -86,23 +87,24 @@ bool AICore::initialize() {
     
 #ifdef _WIN32
     std::string dll_dir = get_dll_dir();
-    
-    if (cache_path_.empty() && !dll_dir.empty()) {
+
+    if (cache_path_.empty()) {
+        // 默认数据库路径: {fb2k_profile}/foo_metadata_enhancer.db
+        std::string profile_path = get_profile_path();
+        cache_path_ = profile_path + "\\" + constants::cache_db_name();
+    }
+
+    if (abort_dir_.empty() && !dll_dir.empty()) {
         std::string base_dir = dll_dir + "\\foo_metadata_enhancer";
-        std::string cache_dir = base_dir + "\\cache";
         std::string abort_dir = base_dir + "\\abort";
-        
-        CreateDirectoryA(cache_dir.c_str(), NULL);
         CreateDirectoryA(abort_dir.c_str(), NULL);
-        
-        cache_path_ = cache_dir + "\\" + constants::cache_db_name();
         abort_dir_ = abort_dir;
     }
-    
+
     if (worker_path_.empty() && !dll_dir.empty()) {
         worker_path_ = dll_dir + "\\foo_metadata_enhancer\\worker\\ai_worker.py";
     }
-    
+
     Logger::instance().debug("initialize: cache_path = " + cache_path_, __FILE__, __FUNCTION__);
     Logger::instance().debug("initialize: worker_path = " + worker_path_, __FILE__, __FUNCTION__);
     Logger::instance().debug("initialize: abort_dir = " + abort_dir_, __FILE__, __FUNCTION__);
@@ -601,19 +603,13 @@ std::vector<EnhancementResult> AICore::stage2_enhance_sync(
             cached_results[i].album_zh = cached->album_zh;
             cached_results[i].artist_zh = cached->artist_zh;
             cached_results[i].translation_confidence = cached->translation_confidence;
-            cached_results[i].genre_value = cached->genre_value;
-            cached_results[i].genre_confidence = cached->genre_confidence;
-            cached_results[i].edition_value = cached->edition_value;
-            cached_results[i].edition_confidence = cached->edition_confidence;
             cached_results[i].error = cached->error_message;
-            
+
             bool all_needed_fields_cached = true;
             if (options.translate_title && cached->title_zh.empty()) all_needed_fields_cached = false;
             if (options.translate_album && cached->album_zh.empty()) all_needed_fields_cached = false;
             if (options.translate_artist && cached->artist_zh.empty()) all_needed_fields_cached = false;
-            if (options.classify_genre && cached->genre_value.empty()) all_needed_fields_cached = false;
-            if (options.identify_edition && cached->edition_value.empty()) all_needed_fields_cached = false;
-            
+
             if (all_needed_fields_cached && cached->success) {
                 cache_fully_hit[i] = true;
                 Logger::instance().debug("stage2_enhance_sync: Full cache hit for track " + tracks[i].track_id, __FILE__, __FUNCTION__);
@@ -714,8 +710,6 @@ std::vector<EnhancementResult> AICore::stage2_enhance_sync(
             options_json["translate_title"] = options.translate_title;
             options_json["translate_album"] = options.translate_album;
             options_json["translate_artist"] = options.translate_artist;
-            options_json["classify_genre"] = options.classify_genre;
-            options_json["identify_edition"] = options.identify_edition;
             options_json["target_language"] = options.target_language;
             params["options"] = options_json;
             
@@ -817,30 +811,20 @@ std::vector<EnhancementResult> AICore::stage2_enhance_sync(
                 EnhancementResult result;
                 result.track_id = r.value("track_id", "");
                 result.success = r.value("success", false);
-                
+
                 result.title_zh = r.value("title_zh", "");
                 result.album_zh = r.value("album_zh", "");
                 result.artist_zh = r.value("artist_zh", "");
                 result.translation_confidence = r.value("translation_confidence", 0.0f);
-                
-                result.genre_value = r.value("genre_value", "");
-                result.genre_confidence = r.value("genre_confidence", 0.0f);
-                
-                result.edition_value = r.value("edition_value", "");
-                result.edition_confidence = r.value("edition_confidence", 0.0f);
-                
+
                 if (r.contains("error") && !r["error"].is_null()) {
                     result.error = r["error"].get<std::string>();
                 }
-                
+
                 if (!result.title_zh.empty()) cached_results[i].title_zh = result.title_zh;
                 if (!result.album_zh.empty()) cached_results[i].album_zh = result.album_zh;
                 if (!result.artist_zh.empty()) cached_results[i].artist_zh = result.artist_zh;
                 if (result.translation_confidence > 0) cached_results[i].translation_confidence = result.translation_confidence;
-                if (!result.genre_value.empty()) cached_results[i].genre_value = result.genre_value;
-                if (result.genre_confidence > 0) cached_results[i].genre_confidence = result.genre_confidence;
-                if (!result.edition_value.empty()) cached_results[i].edition_value = result.edition_value;
-                if (result.edition_confidence > 0) cached_results[i].edition_confidence = result.edition_confidence;
                 cached_results[i].track_id = result.track_id;
                 cached_results[i].success = result.success;
                 if (!result.error.empty()) cached_results[i].error = result.error;
@@ -933,8 +917,6 @@ std::vector<EnhancementResult> AICore::stage2_enhance_sync(
                 retry_options_json["translate_title"] = options.translate_title;
                 retry_options_json["translate_album"] = options.translate_album;
                 retry_options_json["translate_artist"] = options.translate_artist;
-                retry_options_json["classify_genre"] = options.classify_genre;
-                retry_options_json["identify_edition"] = options.identify_edition;
                 retry_options_json["target_language"] = options.target_language;
                 retry_params["options"] = retry_options_json;
                 
@@ -977,23 +959,15 @@ std::vector<EnhancementResult> AICore::stage2_enhance_sync(
                     result.album_zh = r.value("album_zh", "");
                     result.artist_zh = r.value("artist_zh", "");
                     result.translation_confidence = r.value("translation_confidence", 0.0f);
-                    result.genre_value = r.value("genre_value", "");
-                    result.genre_confidence = r.value("genre_confidence", 0.0f);
-                    result.edition_value = r.value("edition_value", "");
-                    result.edition_confidence = r.value("edition_confidence", 0.0f);
-                    
+
                     if (r.contains("error") && !r["error"].is_null()) {
                         result.error = r["error"].get<std::string>();
                     }
-                    
+
                     if (!result.title_zh.empty()) cached_results[i].title_zh = result.title_zh;
                     if (!result.album_zh.empty()) cached_results[i].album_zh = result.album_zh;
                     if (!result.artist_zh.empty()) cached_results[i].artist_zh = result.artist_zh;
                     if (result.translation_confidence > 0) cached_results[i].translation_confidence = result.translation_confidence;
-                    if (!result.genre_value.empty()) cached_results[i].genre_value = result.genre_value;
-                    if (result.genre_confidence > 0) cached_results[i].genre_confidence = result.genre_confidence;
-                    if (!result.edition_value.empty()) cached_results[i].edition_value = result.edition_value;
-                    if (result.edition_confidence > 0) cached_results[i].edition_confidence = result.edition_confidence;
                     cached_results[i].track_id = result.track_id;
                     cached_results[i].success = result.success;
                     if (!result.error.empty()) cached_results[i].error = result.error;
@@ -1061,6 +1035,49 @@ bool AICore::ensure_snapshot(
         return false;
     }
     return backup_manager_->ensure_snapshot(track_id, snapshot);
+}
+
+// ============= 多操作类型回滚接口实现 =============
+
+bool AICore::ensure_operation_snapshot(
+    const std::string& track_id,
+    OperationType op_type,
+    const std::map<std::string, std::string>& snapshot
+) {
+    if (!initialized_ || track_id.empty() || !backup_manager_) {
+        return false;
+    }
+    return backup_manager_->ensure_operation_snapshot(track_id, op_type, snapshot);
+}
+
+std::optional<std::map<std::string, std::string>> AICore::rollback_operation(
+    const std::string& track_id,
+    OperationType op_type
+) {
+    if (!initialized_ || track_id.empty() || !backup_manager_) {
+        LOG_ERROR("rollback_operation: preconditions failed");
+        return std::nullopt;
+    }
+    return backup_manager_->rollback_operation(track_id, op_type);
+}
+
+std::map<std::string, std::map<std::string, std::string>> AICore::batch_rollback_operations(
+    const std::vector<std::string>& track_ids,
+    OperationType op_type
+) {
+    if (!initialized_ || !backup_manager_ || track_ids.empty()) {
+        return {};
+    }
+    return backup_manager_->batch_rollback_operations(track_ids, op_type);
+}
+
+std::map<std::string, std::vector<OperationType>> AICore::get_operations_for_tracks(
+    const std::vector<std::string>& track_ids
+) {
+    if (!initialized_ || !backup_manager_ || track_ids.empty()) {
+        return {};
+    }
+    return backup_manager_->get_operations_for_tracks(track_ids);
 }
 
 bool AICore::save_snapshot(
@@ -1145,10 +1162,6 @@ void AICore::save_stage2_cache(
     cache_entry.album_zh = result.album_zh;
     cache_entry.artist_zh = result.artist_zh;
     cache_entry.translation_confidence = result.translation_confidence;
-    cache_entry.genre_value = result.genre_value;
-    cache_entry.genre_confidence = result.genre_confidence;
-    cache_entry.edition_value = result.edition_value;
-    cache_entry.edition_confidence = result.edition_confidence;
     cache_entry.error_message = result.error;
     
     cache_->set_stage2(cache_key, cache_entry);
@@ -1368,12 +1381,392 @@ std::vector<TrackScrapingResult> AICore::process_batch(
         if (source_str == "musicbrainz") result.release_source = DataSourceType::MUSICBRAINZ;
         else if (source_str == "discogs") result.release_source = DataSourceType::DISCOGS;
         else result.release_source = DataSourceType::AI;
-        
+
         results.push_back(result);
     }
-    
+
     restore_timeout();
     return results;
+}
+
+// ==================== Normalize ====================
+
+std::optional<NormalizeResult> AICore::normalize_sync(
+    const std::vector<TrackInput>& tracks,
+    const NormalizeOptions& options,
+    const std::vector<std::vector<std::string>>& track_field_values,
+    ProgressCallback on_progress,
+    AbortCallback on_abort
+) {
+    LOG_INFO("normalize_sync: Started for field=" + options.field +
+             ", tracks=" + std::to_string(tracks.size()) +
+             ", track_field_values=" + std::to_string(track_field_values.size()));
+
+    if (!initialized_ || !worker_manager_) {
+        LOG_ERROR("normalize_sync: AICore not initialized");
+        return std::nullopt;
+    }
+
+    if (tracks.empty()) {
+        LOG_WARN("normalize_sync: No tracks provided");
+        return NormalizeResult{};
+    }
+
+    // 字段名 → TrackInput 成员映射
+    auto get_field_value = [&options](const TrackInput& t) -> std::string {
+        if (options.field == "artist")       return t.artist;
+        if (options.field == "album_artist") return t.album_artist;
+        if (options.field == "album")        return t.album;
+        if (options.field == "genre")        return t.genre;
+        if (options.field == "label")        return t.label;
+        if (options.field == "composer")     return t.composer;
+        return t.artist;
+    };
+
+    // =========================================================================
+    // 架构原则：C++ 端不做业务逻辑处理。
+    //   - Unicode 空白归一化、零宽字符移除、变体合并等业务逻辑全部交由
+    //     Python 端 _clean_candidates 处理（Python str.strip() 天然支持 Unicode）
+    //   - C++ 仅负责：精确字符串去重、SQLite 知识库查询（缓存层）、IPC 调度
+    //   - 这样避免两端重复实现导致格式差异引发的空格去除失败等问题
+    // =========================================================================
+
+    // 1. 收集所有唯一 alias 字符串（仅精确匹配去重，不做 normalize_key 合并）
+    //    每个原始写法独立成 entry，Unicode 空白/零宽字符变体的归并交给 Python。
+    struct AliasEntryCollected {
+        std::string alias;                      // 原始写法
+        std::vector<std::map<std::string, std::string>> examples;
+    };
+    std::map<std::string, AliasEntryCollected> alias_map;  // key = 原始 alias 字符串
+    for (const auto& track : tracks) {
+        std::string value = get_field_value(track);
+        if (value.empty()) continue;
+
+        auto it = alias_map.find(value);
+        if (it == alias_map.end()) {
+            AliasEntryCollected c;
+            c.alias = value;
+            alias_map[value] = std::move(c);
+            it = alias_map.find(value);
+        }
+
+        // 收集 examples（最多 N 首歌 / N 张专辑）
+        int song_count = 0;
+        int album_count = 0;
+        for (const auto& ex : it->second.examples) {
+            if (ex.count("title")) song_count++;
+            if (ex.count("album")) album_count++;
+        }
+        if (song_count < options.max_examples_per_alias && !track.title.empty()) {
+            std::map<std::string, std::string> ex;
+            ex["title"] = track.title;
+            if (album_count < options.max_albums_per_alias && !track.album.empty()) {
+                ex["album"] = track.album;
+            }
+            it->second.examples.push_back(ex);
+        } else if (album_count < options.max_albums_per_alias && !track.album.empty()) {
+            std::map<std::string, std::string> ex;
+            ex["album"] = track.album;
+            it->second.examples.push_back(ex);
+        }
+    }
+
+    if (alias_map.empty()) {
+        LOG_WARN("normalize_sync: No alias values extracted from tracks");
+        return NormalizeResult{};
+    }
+
+    // 2. 先查 SQLite normalize_alias 知识库（缓存层职责）
+    //    SQLite 存储的是原始写法，故直接用原始 alias 字符串查询。
+    //    注意：不做变体预合并，因此若 "X" 命中而 "X "（尾空格）未命中，
+    //    "X " 会送 AI 判断（AI 通常会归到同一 canonical）。
+    std::vector<std::string> all_aliases;
+    all_aliases.reserve(alias_map.size());
+    for (const auto& [k, _] : alias_map) {
+        all_aliases.push_back(k);
+    }
+
+    std::vector<AliasEntry> known_aliases;
+    if (cache_) {
+        known_aliases = cache_->get_aliases(options.field, all_aliases);
+        LOG_INFO("normalize_sync: SQLite hit " + std::to_string(known_aliases.size()) +
+                 "/" + std::to_string(all_aliases.size()) + " aliases");
+    }
+
+    // 已知 alias 直接构建为 known_groups（confidence=1.0）
+    // 注意：known_groups 不直接加入 result.groups，而是作为 IPC 参数送给 Python，
+    // 让 Python 的 _merge_pre_groups 把 _clean_candidates 生成的变体 pre_groups
+    // 合并到 known_groups 中。这样能正确处理 SQLite 存的是 trim 过的 alias，
+    // 而 track 实际值带尾空格的情况（变体合并由 Python 统一完成）。
+    NormalizeResult result;
+    std::vector<NormalizeGroup> known_groups;
+    std::set<std::string> handled_aliases;  // 已处理的原始 alias 字符串
+
+    // 建立 alias_name → AliasEntry 索引
+    std::map<std::string, const AliasEntry*> known_alias_map;
+    for (const auto& ae : known_aliases) {
+        known_alias_map[ae.alias_name] = &ae;
+    }
+
+    for (const auto& [alias_value, _] : alias_map) {
+        auto it = known_alias_map.find(alias_value);
+        if (it == known_alias_map.end()) continue;
+
+        const AliasEntry* hit = it->second;
+        NormalizeGroup* existing = nullptr;
+        for (auto& g : known_groups) {
+            if (g.canonical_name == hit->canonical_name) {
+                existing = &g;
+                break;
+            }
+        }
+        if (!existing) {
+            NormalizeGroup g;
+            g.canonical_name = hit->canonical_name;
+            g.confidence = hit->confidence;
+            g.reason = hit->reason.empty() ? "SQLite knowledge base hit" : hit->reason;
+            known_groups.push_back(std::move(g));
+            existing = &known_groups.back();
+        }
+        // 加入此 alias（去重）
+        std::set<std::string> in_group(existing->aliases.begin(), existing->aliases.end());
+        if (in_group.insert(alias_value).second) {
+            existing->aliases.push_back(alias_value);
+        }
+        handled_aliases.insert(alias_value);
+    }
+
+    LOG_INFO("normalize_sync: SQLite resolved " + std::to_string(handled_aliases.size()) +
+             "/" + std::to_string(alias_map.size()) + " aliases");
+
+    // 3. 收集未命中的 alias，发送给 AI
+    //    发送的是原始 alias 字符串（含可能的空白/零宽字符变体），
+    //    Python 端 _clean_candidates 会做 Unicode 空白归一化与变体合并，
+    //    返回的 groups.aliases 已包含所有原始变体，C++ 无需再做变体回填。
+    std::vector<NormalizeCandidate> unknown_candidates;
+    for (const auto& [alias_value, cand] : alias_map) {
+        if (handled_aliases.find(alias_value) == handled_aliases.end()) {
+            NormalizeCandidate nc;
+            nc.alias = cand.alias;
+            nc.examples = cand.examples;
+            unknown_candidates.push_back(std::move(nc));
+        }
+    }
+
+    if (unknown_candidates.empty()) {
+        LOG_INFO("normalize_sync: All aliases resolved by SQLite, no AI call needed");
+        // 仍然发送请求给 Python，让它根据 known_groups + track_values 构造 track_updates。
+        // Python 端 process() 检测到 candidates 为空 + known_groups 非空时，
+        // 会直接返回 known_groups + track_updates，不调用 AI。
+        // 这样统一由 Python 构造 track_updates，避免 C++ 端重复实现匹配逻辑。
+    }
+
+    // 4. 构造 IPC 请求发送给 Worker
+    std::string task_id = generate_request_id();
+    if (on_progress) on_progress(0, 1, "Calling AI for " + std::to_string(unknown_candidates.size()) + " unknown aliases");
+
+    nlohmann::json request;
+    request["method"] = "normalize";
+    request["id"] = task_id;
+    request["version"] = 1;
+    request["task_id"] = task_id;
+
+    nlohmann::json params;
+    params["field"] = options.field;
+    nlohmann::json candidates_json = nlohmann::json::array();
+    for (const auto& c : unknown_candidates) {
+        nlohmann::json cj;
+        cj["alias"] = c.alias;
+        nlohmann::json exs = nlohmann::json::array();
+        for (const auto& ex : c.examples) {
+            nlohmann::json ej;
+            for (const auto& [k, v] : ex) ej[k] = v;
+            exs.push_back(ej);
+        }
+        cj["examples"] = exs;
+        candidates_json.push_back(cj);
+    }
+    params["candidates"] = candidates_json;
+
+    // 把 SQLite 命中的 known_groups 送给 Python，让 Python 的 _merge_pre_groups
+    // 把 _clean_candidates 生成的变体 pre_groups 合并到 known_groups 中。
+    // 这样能正确处理 SQLite 存的是 trim 过的 alias，而 track 实际值带尾空格的情况。
+    nlohmann::json known_groups_json = nlohmann::json::array();
+    for (const auto& g : known_groups) {
+        nlohmann::json gj;
+        gj["canonical_name"] = g.canonical_name;
+        gj["confidence"] = g.confidence;
+        gj["reason"] = g.reason;
+        nlohmann::json aliases_j = nlohmann::json::array();
+        for (const auto& a : g.aliases) {
+            aliases_j.push_back(a);
+        }
+        gj["aliases"] = aliases_j;
+        known_groups_json.push_back(gj);
+    }
+    params["known_groups"] = known_groups_json;
+
+    // 把每个 track 当前 field 的所有 values（multi-value）送给 Python。
+    // Python 在生成最终 groups 后，根据 groups 为每个 track 构造目标 values
+    // （track_updates），一起返回。C++ 端直接用 track_updates 写入 tag，
+    // 不再做 alias_to_canonical 匹配，避免 Unicode 表示差异导致漏匹配。
+    // track_index 与 m_tracks 的索引一一对应。
+    nlohmann::json track_values_json = nlohmann::json::array();
+    size_t values_count = (std::min)(track_field_values.size(), tracks.size());
+    for (size_t i = 0; i < values_count; ++i) {
+        nlohmann::json tvj;
+        tvj["track_index"] = static_cast<int>(i);
+        tvj["track_id"] = tracks[i].track_id;
+        nlohmann::json vals = nlohmann::json::array();
+        for (const auto& v : track_field_values[i]) {
+            if (!v.empty()) vals.push_back(v);
+        }
+        tvj["values"] = vals;
+        track_values_json.push_back(tvj);
+    }
+    params["track_values"] = track_values_json;
+    request["params"] = params;
+
+    std::string request_str = request.dump();
+    LOG_INFO("normalize_sync: Sending " + std::to_string(unknown_candidates.size()) +
+             " candidates to AI worker, task_id=" + task_id);
+
+    auto response_promise = std::make_shared<std::promise<BatchResponse>>();
+    std::future<BatchResponse> response_future = response_promise->get_future();
+
+    bool sent = worker_manager_->send_request(
+        task_id, request_str,
+        [response_promise](const std::string&, const BatchResponse& resp) {
+            response_promise->set_value(resp);
+        },
+        [response_promise](const std::string&, const ErrorInfo& err) {
+            BatchResponse resp;
+            resp.success = false;
+            resp.error = err;
+            response_promise->set_value(resp);
+        }
+    );
+
+    if (!sent) {
+        LOG_ERROR("normalize_sync: Failed to send request to worker");
+        return std::nullopt;
+    }
+
+    // 5. 等待响应（支持 abort）
+    auto start_time = std::chrono::steady_clock::now();
+    const uint32_t timeout_ms = constants::BASE_TIMEOUT_MS;
+    bool was_aborted = false;
+    bool timed_out = false;
+
+    while (true) {
+        auto status = response_future.wait_for(std::chrono::milliseconds(constants::CHECK_INTERVAL_MS));
+        if (status == std::future_status::ready) break;
+
+        if (on_abort && on_abort()) {
+            LOG_INFO("normalize_sync: Abort requested by user");
+            request_abort(task_id);
+            was_aborted = true;
+            break;
+        }
+
+        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - start_time).count();
+        if (elapsed >= timeout_ms) {
+            LOG_ERROR("normalize_sync: Timeout");
+            timed_out = true;
+            break;
+        }
+    }
+
+    if (was_aborted) {
+        clear_abort(task_id);
+        return std::nullopt;
+    }
+    if (timed_out) {
+        return std::nullopt;
+    }
+
+    BatchResponse response = response_future.get();
+    if (!response.success) {
+        LOG_ERROR("normalize_sync: " +
+            (response.error ? response.error->message : "Unknown error"));
+        return std::nullopt;
+    }
+
+    // 6. 解析 AI 响应
+    if (response.results.empty()) {
+        LOG_WARN("normalize_sync: Empty results from worker");
+        return result;
+    }
+
+    const auto& ai_result = response.results[0];
+    if (!ai_result.contains("groups") && !ai_result.contains("uncertain")) {
+        LOG_ERROR("normalize_sync: Invalid AI response, missing groups/uncertain");
+        return std::nullopt;
+    }
+
+    // 合并 AI 返回的 groups
+    for (const auto& g : ai_result.value("groups", nlohmann::json::array())) {
+        NormalizeGroup ng;
+        ng.canonical_name = g.value("canonical_name", "");
+        ng.confidence = g.value("confidence", 0.0f);
+        ng.reason = g.value("reason", "");
+        for (const auto& a : g.value("aliases", nlohmann::json::array())) {
+            ng.aliases.push_back(a.get<std::string>());
+        }
+        if (!ng.canonical_name.empty() && !ng.aliases.empty()) {
+            result.groups.push_back(std::move(ng));
+        }
+    }
+
+    // 合并 uncertain
+    for (const auto& u : ai_result.value("uncertain", nlohmann::json::array())) {
+        NormalizeUncertain nu;
+        nu.alias = u.value("alias", "");
+        nu.reason = u.value("reason", "");
+        if (!nu.alias.empty()) {
+            result.uncertain.push_back(std::move(nu));
+        }
+    }
+
+    // 解析 track_updates：Python 端已根据最终 groups 为每个 track 构造好目标 values。
+    // C++ 端直接用 new_values 写入 tag，不再做 alias_to_canonical 匹配。
+    int matched_count = 0;
+    for (const auto& tu : ai_result.value("track_updates", nlohmann::json::array())) {
+        NormalizeTrackUpdate ntu;
+        ntu.track_index = tu.value("track_index", -1);
+        ntu.track_id = tu.value("track_id", "");
+        ntu.matched = tu.value("matched", false);
+        ntu.canonical_name = tu.value("canonical_name", "");
+        for (const auto& v : tu.value("original_values", nlohmann::json::array())) {
+            ntu.original_values.push_back(v.get<std::string>());
+        }
+        for (const auto& v : tu.value("new_values", nlohmann::json::array())) {
+            ntu.new_values.push_back(v.get<std::string>());
+        }
+        if (ntu.matched) matched_count++;
+        result.track_updates.push_back(std::move(ntu));
+    }
+    LOG_INFO("normalize_sync: Parsed track_updates=" +
+             std::to_string(result.track_updates.size()) +
+             ", matched=" + std::to_string(matched_count));
+
+    // 注意：无需变体回填。
+    //   原实现中 C++ 发送代表 alias 给 Python，Python 返回的 aliases 只含代表，
+    //   故 C++ 需把原始变体（如 "X " vs "X"）手动加回 group。
+    //   现在 C++ 直接发送所有原始 alias 字符串，Python _clean_candidates 已完成
+    //   Unicode 空白归一化与变体合并，返回的 groups.aliases 自然包含所有原始变体。
+
+    if (on_progress) on_progress(1, 1, "Normalize complete");
+    LOG_INFO("normalize_sync: Complete, groups=" + std::to_string(result.groups.size()) +
+             ", uncertain=" + std::to_string(result.uncertain.size()) +
+             ", track_updates=" + std::to_string(result.track_updates.size()));
+    return result;
+}
+
+bool AICore::batch_upsert_aliases(const std::vector<AliasEntry>& entries) {
+    if (!cache_ || entries.empty()) return false;
+    return cache_->batch_upsert_aliases(entries);
 }
 
 }

@@ -30,14 +30,27 @@ foo_metadata_enhancer 是一个 foobar2000 插件，利用人工智能技术自�
 
 ### 1.2 核心功能
 
+V8.2 起按三个互不重叠的功能层组织（见 [三功能边界](#三功能边界-v82)）：
+
 | 功能 | 描述 |
 |------|------|
-| 刮削元数据 | 从 MusicBrainz、Discogs、AI 获取基础元数据 |
-| 增强元数据 | AI 驱动的翻译、流派分类、版本识别 |
+| Scrape（刮削） | 从 MusicBrainz、Discogs、AI 获取本地没有的数据（事实获取）。V8.2 起 genre 由本层从 MusicBrainz recording 详情获取 |
+| Enhancer（增强） | 基于已有元数据生成新价值（不获取新事实）。当前能力：中文翻译。V8.2 移除 edition 识别 |
+| Normalize（规范化） | 已有 Tag → 标准 Tag（一致性归一化）。当前能力：歌手名规范化 |
 | 一键处理 | 自动串联刮削 + 增强，跳过中间确认 |
-| 回滚 | 恢复到处理前的原始状态 |
+| 多操作回滚 | 每种操作独立快照（Scrape / Translate / Normalize），可单独回滚某类操作 |
+| 别名去重 | 编辑后 + 应用前双重去重，防止别名重复 |
 | 缓存管理 | 查看和清理缓存数据 |
 | 翻译风格配置 | 三种翻译策略：官方译名优先 / 字面直译 / 意译 |
+| 不确定结果人工确认 | 当 web search 不可用（如 Zhipu Chat）时，保存不确定结果并提示用户确认 |
+
+#### 三功能边界（V8.2）
+
+| 层 | 职责 | 数据来源 | 产物 | 不做的事 |
+|----|------|----------|------|----------|
+| Scrape | 获取本地没有的数据（事实获取） | MusicBrainz / Discogs / AI 降级 | title / artist / album / year / genre / composer / musicbrainz_id | 翻译、归一化 |
+| Enhancer | 基于已有元数据生成新价值 | 已有 Tag | title_zh / album_zh / artist_zh | 获取新事实、归一化 |
+| Normalize | 已有 Tag → 标准 Tag | 已有 Tag | ARTIST / ALBUM ARTIST（规范化后） | 获取新事实、翻译 |
 
 ### 1.3 工作流程
 
@@ -171,8 +184,8 @@ python --version
 
 #### 步骤 3：选择操作
 
-- **Scrape Metadata** - 获取基础元数据（分步模式，处理后需确认）
-- **Enhance Metadata** - AI 增强处理（翻译/流派/版本）
+- **Scrape Metadata** - 从外部数据源获取本地没有的数据（分步模式，处理后需确认）
+- **Enhance Metadata** - AI 翻译增强（标题/专辑/艺术家译为中文）
 - **Scrape & Enhance (Auto)** - 一键模式，自动串联两步，中间不弹确认框
 
 #### 步骤 4：预览和确认
@@ -193,15 +206,16 @@ python --version
 
 | 菜单项 | 功能说明 |
 |--------|----------|
-| **Scrape Metadata** | 从 MusicBrainz/Discogs/AI 获取基础元数据 |
-| **Enhance Metadata** | AI 增强处理（翻译、流派分类、版本识别） |
+| **Scrape Metadata** | 从 MusicBrainz/Discogs/AI 获取本地没有的数据（V8.2 起 genre 也由本层获取） |
+| **Enhance Metadata** | AI 翻译增强（标题/专辑/艺术家译为中文）。V8.2 移除 genre 分类与 edition 识别 |
 | **Scrape & Enhance (Auto)** | 一键模式：自动串联刮削 + 增强，跳过中间确认 |
+| **Normalize Artist** | 歌手名规范化（alias → canonical） |
 
 **回滚组**：
 
 | 菜单项 | 功能说明 |
 |--------|----------|
-| **Rollback to Initial** | 回滚到处理前的原始状态 |
+| **Rollback** | 弹窗选择回滚哪种操作：Scrape / Translate / Normalize（每类操作独立快照） |
 
 **工具组**：
 
@@ -224,7 +238,7 @@ MusicBrainz (优先级最高) → Discogs (补充) → AI (兜底)
 
 #### 5.2.2 选项对话框
 
-点击 Stage 1 后，会弹出选项对话框：
+点击 Scrape Metadata 后，会弹出选项对话框：
 
 **数据源设置**：
 
@@ -287,6 +301,7 @@ MusicBrainz (优先级最高) → Discogs (补充) → AI (兜底)
 | CONDUCTOR | 指挥 | MB/Discogs |
 | PERFORMER | 演奏者 | MB/Discogs |
 | LABEL | 唱片公司 | MB/Discogs |
+| GENRE | 流派（V8.2 起由本层从 MusicBrainz recording 详情获取） | MB |
 
 ---
 
@@ -294,21 +309,21 @@ MusicBrainz (优先级最高) → Discogs (补充) → AI (兜底)
 
 #### 5.3.1 功能说明
 
-Enhance Metadata 使用 AI 对已有元数据进行增强处理：
+Enhance Metadata 属于 Enhancer 层 —— 基于已有元数据生成新价值，不获取新事实：
 
 - **翻译**：将标题、专辑、艺术家翻译为中文
-- **流派分类**：AI 分析并分类音乐流派
-- **版本识别**：识别是否为原版、重制版、现场版等
+
+> V8.2 变更：
+> - 移除 **流派分类**（genre 改由 Scrape 层从 MusicBrainz recording 详情获取，见 5.2）
+> - 移除 **版本识别**（AI 推断不可靠）
 
 #### 5.3.2 选项对话框
 
-点击 Stage 2 后，会显示选项说明：
+点击 Enhance 后，会显示选项说明：
 
 ```
 AI will perform the following enhancements:
 - Translate metadata to Chinese (Title, Album, Artist)
-- Classify genre
-- Identify edition (Original, Remastered, Live, etc.)
 
 Select which fields to write in the confirmation dialog.
 ```
@@ -322,15 +337,20 @@ Select which fields to write in the confirmation dialog.
 | Title_ZH | TITLE_ZH | 中文标题 |
 | Album_ZH | ALBUM_ZH | 中文专辑名 |
 | Artist_ZH | ARTIST_ZH | 中文艺术家名 |
-| Genre | GENRE | AI 分类的流派 |
-| Edition | EDITION | 版本信息 |
+
+> V8.2 起确认对话框列数为 6 列：Track ID / Title ZH / Album ZH / Artist ZH / Confidence / Success（移除了 Genre / Edition 列）。
+
+**已是中文内容的显示行为**：当原始元数据本身就是中文（无需翻译）时，AI 会返回空的 `*_zh` 字段。此时确认对话框会回退显示原始值（Title / Album / Artist），而不是空白单元格，便于用户辨认曲目。同时：
+
+- `Confidence` 列显示 `N/A (Chinese)`
+- `Success` 列显示 `Skipped`
+- 该行默认**不勾选**，不会写入任何 `*_ZH` 标签（避免用原值覆盖已有标签）
+- 如需强制写入，可手动勾选该行
 
 #### 5.3.4 写入的标签
 
 | 标签 | 说明 | 示例值 |
 |------|------|--------|
-| GENRE | AI 分类的流派 | "Synth-pop; Electronic" |
-| EDITION | 版本信息 | "Remastered", "Live", "Deluxe Edition" |
 | TITLE_ZH | 中文标题 | "芳华之年" |
 | ALBUM_ZH | 中文专辑名 | "百惠传" |
 | ARTIST_ZH | 中文艺术家名 | "山口百惠" |
@@ -401,32 +421,47 @@ Scrape Metadata（自动应用所有成功结果）→ Enhance Metadata（弹确
 
 ---
 
-### 5.5 Rollback to Initial 详解
+### 5.5 Rollback 详解
 
 #### 5.5.1 功能说明
 
-将选中的曲目恢复到处理前的原始状态。
+V8.2 起支持**多操作回滚**：将选中的曲目按操作类型独立回滚。每种操作（Scrape / Translate / Normalize）维护各自的快照，回滚时仅恢复该操作影响的字段，不影响其他操作的结果。
 
 #### 5.5.2 使用场景
 
-- 处理结果不满意
-- 错误处理了曲目
-- 想要恢复原始标签
+- 翻译结果不满意 → 仅回滚 Translate，保留 Scrape 结果
+- 刮削结果错误 → 仅回滚 Scrape，保留翻译
+- 歌手规范化错误 → 仅回滚 Normalize
+- 全部重来 → 同时勾选所有操作类型
 
-#### 5.5.3 确认对话框
+#### 5.5.3 回滚类型选择对话框
+
+点击 **Rollback** 后弹出选择对话框，仅显示存在快照的操作类型及对应曲目数：
 
 ```
-Rollback all selected tracks to their initial state?
+Select rollback operations:
 
-This will restore the original metadata before any AI processing.
+☑ Scrape (12 tracks)
+☑ Translate (10 tracks)
+☐ Normalize (0 tracks)   ← 无快照时不显示
+
+[OK] [Cancel]
 ```
 
-点击 **Yes** 确认回滚，点击 **No** 取消。
+勾选要回滚的操作类型后点击 **OK**，再次确认后执行。
 
-#### 5.5.4 注意事项
+#### 5.5.4 影响字段
 
-- 只能回滚到最近一次 Stage 处理前的状态
-- 如果多次处理，只能回滚到第一次处理前的状态
+| 操作类型 | 影响字段 |
+|----------|----------|
+| Scrape | 全量（删除所有非黑名单字段后重设） |
+| Translate | TITLE_ZH / ALBUM_ZH / ARTIST_ZH |
+| Normalize | ARTIST / ALBUM ARTIST / COMPOSER / PERFORMER / ALBUMARTIST |
+
+#### 5.5.5 注意事项
+
+- 仅能回滚存在快照的操作类型
+- 每个操作类型仅保留最近一次快照
 - 回滚操作不可撤销
 
 ---
@@ -902,33 +937,49 @@ track_id = SHA256(path + "|" + subsong + "|" + file_size)
 
 ## 10. 备份与回滚
 
-### 10.1 自动备份
+### 10.1 自动备份（多操作快照）
 
-在执行 Scrape Metadata 或 Enhance Metadata 之前，插件会自动备份当前标签：
+V8.2 起，每次执行 Scrape / Enhance / Normalize 之前，插件会按**操作类型**独立快照当前标签。同一曲目可同时存在多条不同类型的快照：
 
 ```
-备份位置：%APPDATA%\foobar2000-v2\foo_metadata_enhancer\backup.db
+备份位置：%APPDATA%\foobar2000-v2\foo_metadata_enhancer.db
+表：metadata_snapshots
+唯一约束：(track_id, operation_type)
 ```
+
+操作类型（`OperationType`）：
+
+| 类型 | 标识 | 影响字段（回滚时仅恢复这些） |
+|------|------|-------------------------------|
+| Scrape | `scrape` | 全量（删除所有非黑名单字段后重设） |
+| Translate | `translate` | TITLE_ZH / ALBUM_ZH / ARTIST_ZH |
+| Normalize | `normalize` | ARTIST / ALBUM ARTIST / COMPOSER / PERFORMER / ALBUMARTIST |
+
+> 回滚数据采用 JSON 保存，不同的回滚使用不同的 `operation_type` 标识。每条数据对应具体操作最开始的状态。
 
 ### 10.2 备份内容
 
-备份包含以下信息：
+每条快照包含：
 
 - 曲目 ID（track_id）
-- 所有现有标签（键值对）
+- 操作类型（operation_type）
+- 所有现有标签（JSON）
 - 备份时间戳
 
 ### 10.3 回滚操作
 
 1. 选择要回滚的曲目
-2. 右键 → **AI Metadata** → **Rollback to Initial**
-3. 确认回滚操作
+2. 右键 → **AI Metadata** → **Rollback**
+3. 弹窗中勾选要回滚的操作类型（仅显示存在快照的操作，并显示曲目数）
+4. 确认回滚
+
+回滚时仅修改该操作类型影响的字段，其他操作的结果保持不变（部分快照应用）。
 
 ### 10.4 回滚限制
 
-- 只能回滚到初始状态（第一次处理前）
-- 中间状态无法恢复
-- 回滚后无法撤销
+- 仅能回滚存在快照的操作类型
+- 每个操作类型仅保留最近一次快照（覆盖式）
+- 回滚操作不可撤销
 
 ---
 
@@ -1169,8 +1220,7 @@ cmake -B out/build ^
 | 文件 | 位置 |
 |------|------|
 | 配置文件 | `%APPDATA%\foobar2000-v2\foo_metadata_enhancer\settings.json` |
-| 缓存数据库 | `%APPDATA%\foobar2000-v2\foo_metadata_enhancer\cache.db` |
-| 备份数据库 | `%APPDATA%\foobar2000-v2\foo_metadata_enhancer\backup.db` |
+| 缓存/备份数据库 | `%APPDATA%\foobar2000-v2\foo_metadata_enhancer.db` |
 | 日志文件 | `%APPDATA%\foobar2000-v2\foo_metadata_enhancer\logs\` |
 
 ### C. 性能优化建议
@@ -1184,6 +1234,17 @@ cmake -B out/build ^
 ---
 
 ## 更新日志
+
+### v1.2.0 (V8.2 三功能分界)
+
+- **三功能边界明确**：代码与文档按 Scrape / Enhancer / Normalize 三个互不重叠的层重组（见 [三功能边界](#三功能边界-v82)）
+- **Genre 移至 Scrape 层**：从 MusicBrainz recording 详情获取（事实获取），不再由 Enhancer 层 AI 分类
+- **Stage2 移除 edition 识别**：AI 推断不可靠，已删除 EDITION 字段及相关 UI/缓存/回滚逻辑
+- **多操作回滚**：扩展快照系统支持按操作类型独立快照（Scrape / Translate / Normalize），回滚弹窗选择要回滚的操作，仅恢复该操作影响的字段
+- **别名去重**：编辑后 + 应用前双重去重，防止别名列表中出现重复项
+- **不确定结果人工确认**：当 web search 不可用（如 Zhipu Chat）时，保存不确定结果并提示用户手动确认
+- **数据模型统一**：消除 Python worker 与 C++ 端的重复模型定义，单一定义多处调用
+- **确认对话框**：列数从 8 列收缩为 6 列（移除 Genre / Edition 列）
 
 ### v1.1.0
 

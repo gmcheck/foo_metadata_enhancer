@@ -2,37 +2,19 @@
 # -*- coding: utf-8 -*-
 """
 Common Module
-Shared utilities and helpers
+共享工具与 IPC 边界模型
+
+V8.2 数据模型统一：
+  本包仅导出 IPC 边界 Pydantic 模型（models.py）与共享工具（text_utils 等）。
+  运行时 dataclass 模型请从 core/types.py 或 data_sources/base.py 导入。
+
+V8.2 移除：所有 V8.1 孤儿模型（TrackOptions/GenreInfo/EditionInfo/... 等），
+          它们要么由 IPC 模型（Stage1Scraping*/Stage2Enhancement*）承担，
+          要么由运行时 dataclass（Candidate/FinalResult/QueryInput 等）承担。
 """
 
-from .text_utils import (
-    clean_value,
-    clean_dict_values,
-    clean_list_values,
-    clean_field_dict,
-    is_valid_value,
-    INVALID_VALUES,
-)
-
 from .models import (
-    TrackOptions,
-    TrackInput,
-    GenreInfo,
-    EditionInfo,
-    TranslationInfo,
-    AIResult,
-    AnalysisInfo,
-    OriginalMetadata,
-    TrackAnalysisResult,
-    ErrorInfo,
-    BatchResponse,
-    IPCRequest,
     IPCResponse,
-    ScrapingOptions,
-    EnhancementOptionsModel,
-    ScrapedFieldModel,
-    TrackScrapingResultModel,
-    EnhancementResultModel,
     Stage1ScrapingResultModel,
     Stage1ScrapedFieldModel,
     Stage1ScrapingResponseModel,
@@ -44,37 +26,8 @@ from .models import (
     create_stage2_error_result,
 )
 
-from .config_manager import (
-    ConfigManager,
-    setup_logging,
-    get_config,
-)
-
 __all__ = [
-    "clean_value",
-    "clean_dict_values",
-    "clean_list_values",
-    "clean_field_dict",
-    "is_valid_value",
-    "INVALID_VALUES",
-    "TrackOptions",
-    "TrackInput",
-    "GenreInfo",
-    "EditionInfo",
-    "TranslationInfo",
-    "AIResult",
-    "AnalysisInfo",
-    "OriginalMetadata",
-    "TrackAnalysisResult",
-    "ErrorInfo",
-    "BatchResponse",
-    "IPCRequest",
     "IPCResponse",
-    "ScrapingOptions",
-    "EnhancementOptionsModel",
-    "ScrapedFieldModel",
-    "TrackScrapingResultModel",
-    "EnhancementResultModel",
     "Stage1ScrapingResultModel",
     "Stage1ScrapedFieldModel",
     "Stage1ScrapingResponseModel",
@@ -84,7 +37,4 @@ __all__ = [
     "create_stage1_error_result",
     "create_stage2_enhancement_result",
     "create_stage2_error_result",
-    "ConfigManager",
-    "setup_logging",
-    "get_config",
 ]

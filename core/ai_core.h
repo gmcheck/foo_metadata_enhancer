@@ -1,5 +1,31 @@
 #pragma once
 
+// =============================================================================
+// foo_metadata_enhancer - 三功能边界定义（V8.2）
+// =============================================================================
+// 本头文件通过 AICore 暴露三个同步入口，对应三个互不重叠的功能层：
+//
+//   1. Scrape    (stage1_scrape_sync)
+//      - 职责：从外部数据源获取本地没有的数据（事实获取）
+//      - 数据源：MusicBrainz / Discogs / AI 降级
+//      - 产物：title / artist / album / year / genre / composer / ... / musicbrainz_id
+//      - V8.2 变更：genre 改由本层从 MusicBrainz recording 详情获取
+//
+//   2. Enhancer  (stage2_enhance_sync)
+//      - 职责：基于已有元数据生成新价值（不获取新事实）
+//      - 当前能力：中文翻译（title_zh / album_zh / artist_zh）
+//      - V8.2 变更：移除 edition 识别（AI 推断不可靠）；genre 不再由本层产出
+//
+//   3. Normalize (normalize_sync)
+//      - 职责：已有 Tag → 标准 Tag（一致性归一化）
+//      - 当前能力：歌手名规范化（alias → canonical）
+//      - 未来扩展：Genre 映射等
+//      - 注意：本接口不写 SQLite、不修改 Tag；用户确认后由调用方写入
+//
+// 回滚：每种操作对应独立的 OperationType 快照（见 backup_manager.h），
+//       回滚时仅恢复该操作影响的字段（见 menu_handler.cpp get_operation_fields）。
+// =============================================================================
+
 #include "../include/types.h"
 #include "../include/constants.h"
 #include "cache_layer.h"
@@ -19,8 +45,9 @@ namespace ai_metadata {
 
 /**
  * @brief AI核心类，负责协调音轨分析流程
- * 
- * 管理缓存层、Worker进程和任务队列，提供同步和异步分析接口
+ *
+ * 管理缓存层、Worker进程和任务队列，提供同步和异步分析接口。
+ * 暴露 Scrape / Enhancer / Normalize 三个互不重叠的同步入口（见文件头注释）。
  */
 class AICore {
 public:
@@ -49,13 +76,71 @@ public:
         ProgressCallback on_progress = nullptr,
         AbortCallback on_abort = nullptr
     );
-    
+
+    /**
+     * @brief Normalize 同步接口：元数据实体归一化
+     *
+     * 流程：
+     *   1. 从 tracks 提取 field 字段值，去重得 alias 列表
+     *   2. 先查 SQLite normalize_alias 表：命中的直接记为"已知映射"
+     *   3. 未命中的收集 examples（最多 N 首/张），批量发送给 AI
+     *   4. 解析 AI 响应为 NormalizeResult
+     *   5. Python 端根据最终 groups 为每个 track 构造 track_updates（目标 values），
+     *      C++ 端直接用 track_updates 写入，不再做 alias_to_canonical 匹配
+     *
+     * 注意：本方法不写 SQLite，不修改 Tag。用户确认后由调用方写入。
+     *
+     * @param tracks 选中音轨列表
+     * @param options Normalize 选项（field / max_examples 等）
+     * @param track_field_values 每个 track 当前 field 的所有 values（multi-value 支持），
+     *        与 tracks 一一对应，传给 Python 用于构造 track_updates
+     * @param on_progress 进度回调（可选）
+     * @param on_abort 中止回调（可选）
+     * @return NormalizeResult，包含 groups / uncertain / track_updates
+     */
+    std::optional<NormalizeResult> normalize_sync(
+        const std::vector<TrackInput>& tracks,
+        const NormalizeOptions& options,
+        const std::vector<std::vector<std::string>>& track_field_values,
+        ProgressCallback on_progress = nullptr,
+        AbortCallback on_abort = nullptr
+    );
+
     std::optional<std::map<std::string, std::string>> rollback_snapshot(const std::string& track_id);
-    
+
     bool ensure_snapshot(
         const std::string& track_id,
         const std::map<std::string, std::string>& snapshot
     );
+
+    // ============= 多操作类型回滚接口 =============
+    // 同一 track 可有多种操作（scrape/translate/normalize）的初始快照
+    // 每种操作的回滚数据独立保存，回滚时按类型恢复到该操作执行前的状态
+
+    bool ensure_operation_snapshot(
+        const std::string& track_id,
+        OperationType op_type,
+        const std::map<std::string, std::string>& snapshot
+    );
+
+    std::optional<std::map<std::string, std::string>> rollback_operation(
+        const std::string& track_id,
+        OperationType op_type
+    );
+
+    // 批量回滚指定操作类型：返回每个 track 的初始快照
+    std::map<std::string, std::map<std::string, std::string>> batch_rollback_operations(
+        const std::vector<std::string>& track_ids,
+        OperationType op_type
+    );
+
+    // 批量查询：返回每个 track 拥有的可回滚操作类型（供 UI 显示哪些可回滚）
+    std::map<std::string, std::vector<OperationType>> get_operations_for_tracks(
+        const std::vector<std::string>& track_ids
+    );
+
+    // Normalize: 批量写入 alias 映射到 SQLite 知识库（用户确认后调用）
+    bool batch_upsert_aliases(const std::vector<AliasEntry>& entries);
     
     bool save_snapshot(
         const std::string& track_id,

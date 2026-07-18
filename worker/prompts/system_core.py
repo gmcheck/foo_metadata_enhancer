@@ -114,7 +114,7 @@ STAGE1_ENHANCED_OUTPUT_SCHEMA = """Return JSON format (array of results):
 ]"""
 
 # =============================================================================
-# Stage 2 输出 Schema（翻译/流派/版本）
+# Stage 2 输出 Schema（仅翻译）
 # =============================================================================
 
 STAGE2_OUTPUT_SCHEMA = """Return JSON format (array of results):
@@ -124,17 +124,26 @@ STAGE2_OUTPUT_SCHEMA = """Return JSON format (array of results):
         "title_zh": "中文标题",
         "album_zh": "中文专辑名",
         "artist_zh": "中文艺术家名",
-        "translation_confidence": 0.95,
-        "genre": {
-            "value": "Classical",
-            "confidence": 0.98
-        },
-        "edition": {
-            "value": "Original Release",
-            "confidence": 0.85
-        }
+        "translation_confidence": 0.95
     }
-]"""
+]
+
+Note: Stage2 ONLY performs metadata translation (deriving new value from existing data).
+Genre (a factual attribute) is now sourced from MusicBrainz in Stage1.
+Edition identification has been removed (was unreliable from AI inference).
+
+TRANSLATION IS MANDATORY for non-Chinese content:
+- English/Japanese/Korean/other non-Chinese titles MUST be translated to Chinese
+- Always fill title_zh/album_zh/artist_zh with the best Chinese translation
+- Set translation_confidence to 0.5-1.0 based on your confidence in the translation
+
+No-translation case (RARE - only for already-Chinese content):
+- ONLY when the original title/album/artist is ALREADY in Chinese characters
+- In that case, leave the corresponding *_zh field EMPTY and set confidence to 0.0
+- Do NOT skip translation for English or other non-Chinese content
+
+CRITICAL: Empty *_zh fields with confidence=0.0 means "already Chinese, no translation needed".
+For any non-Chinese content, you MUST provide a translation."""
 
 # =============================================================================
 # Fallback 输出 Schema（单首推断）

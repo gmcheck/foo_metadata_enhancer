@@ -200,10 +200,12 @@ class Candidate:
 
 @dataclass
 class FinalResult:
-    """最终决策结果
-    
-    经过AI决策层处理后的最终元数据结果。
-    
+    """最终决策结果（V8.2 单一来源）
+
+    本类是 FinalResult 的唯一定义点，AIResolver / FallbackController /
+    AIInferencer 等所有生产者均使用本类。V8.2 合并了原 core/resolver.py 中的
+    重复定义，并新增 ``sources`` 字段以兼容多源融合场景。
+
     Attributes:
         title: 歌曲标题
         artist: 艺术家名称
@@ -223,7 +225,8 @@ class FinalResult:
         mood: 情绪
         bpm: 节拍
         confidence: 置信度 (0.0-1.0)
-        source: 数据来源标识
+        source: 主数据来源标识（DataSourceType.value 字符串，如 "musicbrainz"）
+        sources: 多源融合时的来源列表（DataSourceType.value 字符串列表）
         selected_candidate_index: 选中的候选索引
         reasoning: 决策依据说明
         is_fallback: 是否为降级结果
@@ -247,6 +250,7 @@ class FinalResult:
     bpm: str = ""
     confidence: float = 0.0
     source: str = ""
+    sources: List[str] = field(default_factory=list)
     selected_candidate_index: int = -1
     reasoning: str = ""
     is_fallback: bool = False
@@ -273,11 +277,12 @@ class FinalResult:
             "bpm": self.bpm,
             "confidence": self.confidence,
             "source": self.source,
+            "sources": list(self.sources),
             "selected_candidate_index": self.selected_candidate_index,
             "reasoning": self.reasoning,
             "is_fallback": self.is_fallback,
         }
-    
+
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "FinalResult":
         """从字典创建"""
@@ -301,6 +306,7 @@ class FinalResult:
             bpm=data.get("bpm", ""),
             confidence=data.get("confidence", 0.0),
             source=data.get("source", ""),
+            sources=list(data.get("sources", [])),
             selected_candidate_index=data.get("selected_candidate_index", -1),
             reasoning=data.get("reasoning", ""),
             is_fallback=data.get("is_fallback", False),
@@ -556,39 +562,41 @@ class ScrapingOptions:
 
 @dataclass
 class EnhancementOptions:
-    """增强选项 - 阶段二"""
-    
+    """增强选项 - 阶段二（仅翻译；genre/edition 已废弃）
+
+    V8.2：classify_genre / identify_edition 已移除。
+    - genre 改由 Stage1 从 MusicBrainz 抓取
+    - edition 已废弃（AI 推断不可靠）
+    保留 from_dict/to_dict 中对这两个字段的兼容读取（忽略），便于老配置文件平滑过渡。
+    """
+
     translate_title: bool = True
     translate_album: bool = True
     translate_artist: bool = True
-    
-    classify_genre: bool = True
-    identify_edition: bool = True
-    
+
     scrape_mood: bool = False
     scrape_bpm: bool = False
-    
+
     def to_dict(self) -> Dict[str, Any]:
         """转换为字典"""
         return {
             "translate_title": self.translate_title,
             "translate_album": self.translate_album,
             "translate_artist": self.translate_artist,
-            "classify_genre": self.classify_genre,
-            "identify_edition": self.identify_edition,
             "scrape_mood": self.scrape_mood,
             "scrape_bpm": self.scrape_bpm,
         }
-    
+
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "EnhancementOptions":
-        """从字典创建"""
+        """从字典创建
+
+        兼容性：忽略旧配置中的 classify_genre / identify_edition 字段。
+        """
         return cls(
             translate_title=data.get("translate_title", True),
             translate_album=data.get("translate_album", True),
             translate_artist=data.get("translate_artist", True),
-            classify_genre=data.get("classify_genre", True),
-            identify_edition=data.get("identify_edition", True),
             scrape_mood=data.get("scrape_mood", False),
             scrape_bpm=data.get("scrape_bpm", False),
         )

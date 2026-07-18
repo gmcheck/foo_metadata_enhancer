@@ -34,39 +34,115 @@ BackupManager::~BackupManager() {
 
 void BackupManager::init_database() {
     std::lock_guard<std::mutex> lock(mutex_);
-    
+
     int rc = sqlite3_open(db_path_.c_str(), reinterpret_cast<sqlite3**>(&db_));
     if (rc != SQLITE_OK) {
         healthy_ = false;
         return;
     }
-    
+
+    // 新库直接建带 operation_type 的表；旧库由 migrate_schema 处理
     const char* create_table_sql = R"(
         CREATE TABLE IF NOT EXISTS metadata_snapshots (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            track_id TEXT NOT NULL UNIQUE,
+            track_id TEXT NOT NULL,
+            operation_type TEXT NOT NULL DEFAULT 'scrape',
             snapshot_data TEXT NOT NULL,
             field_count INTEGER DEFAULT 0,
             created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
+            updated_at TEXT NOT NULL,
+            UNIQUE(track_id, operation_type)
         )
     )";
-    
+
     char* err_msg = nullptr;
     rc = sqlite3_exec(static_cast<sqlite3*>(db_), create_table_sql, nullptr, nullptr, &err_msg);
-    
+
     if (rc != SQLITE_OK) {
         Logger::instance().error("[BackupManager] init_database: Failed to create table: " + std::string(err_msg ? err_msg : "unknown"));
         if (err_msg) sqlite3_free(err_msg);
         healthy_ = false;
         return;
     }
-    
+
+    // 旧库迁移：加 operation_type 列、调整唯一约束
+    migrate_schema();
+
     const char* create_index_sql = "CREATE INDEX IF NOT EXISTS idx_snapshot_track_id ON metadata_snapshots(track_id)";
     sqlite3_exec(static_cast<sqlite3*>(db_), create_index_sql, nullptr, nullptr, nullptr);
-    
+    const char* create_op_index_sql = "CREATE INDEX IF NOT EXISTS idx_snapshot_op_type ON metadata_snapshots(operation_type)";
+    sqlite3_exec(static_cast<sqlite3*>(db_), create_op_index_sql, nullptr, nullptr, nullptr);
+
     healthy_ = true;
     Logger::instance().info("[BackupManager] init_database: SUCCESS, db_path=" + db_path_);
+}
+
+void BackupManager::migrate_schema() {
+    // 检查 operation_type 列是否存在
+    sqlite3_stmt* stmt = nullptr;
+    int rc = sqlite3_prepare_v2(
+        static_cast<sqlite3*>(db_),
+        "PRAGMA table_info(metadata_snapshots)",
+        -1, &stmt, nullptr
+    );
+    if (rc != SQLITE_OK) {
+        return;
+    }
+
+    bool has_op_type = false;
+    bool has_old_unique = false;  // 旧表 track_id UNIQUE
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        const char* col_name = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+        if (col_name && std::string(col_name) == "operation_type") {
+            has_op_type = true;
+        }
+    }
+    sqlite3_finalize(stmt);
+
+    // 旧库无 operation_type 列：添加列并把现有数据标为 scrape
+    if (!has_op_type) {
+        Logger::instance().info("[BackupManager] migrate_schema: adding operation_type column");
+        sqlite3_exec(static_cast<sqlite3*>(db_),
+            "ALTER TABLE metadata_snapshots ADD COLUMN operation_type TEXT NOT NULL DEFAULT 'scrape'",
+            nullptr, nullptr, nullptr);
+
+        // 旧表有 track_id UNIQUE 约束，新表要改为 UNIQUE(track_id, operation_type)
+        // SQLite 无法直接修改约束，需重建表
+        // 1. 重命名旧表
+        sqlite3_exec(static_cast<sqlite3*>(db_),
+            "ALTER TABLE metadata_snapshots RENAME TO metadata_snapshots_old",
+            nullptr, nullptr, nullptr);
+
+        // 2. 创建新表（带复合唯一约束）
+        const char* new_table_sql = R"(
+            CREATE TABLE metadata_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                track_id TEXT NOT NULL,
+                operation_type TEXT NOT NULL DEFAULT 'scrape',
+                snapshot_data TEXT NOT NULL,
+                field_count INTEGER DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(track_id, operation_type)
+            )
+        )";
+        sqlite3_exec(static_cast<sqlite3*>(db_), new_table_sql, nullptr, nullptr, nullptr);
+
+        // 3. 拷贝数据
+        sqlite3_exec(static_cast<sqlite3*>(db_),
+            "INSERT INTO metadata_snapshots (id, track_id, operation_type, snapshot_data, "
+            "field_count, created_at, updated_at) "
+            "SELECT id, track_id, operation_type, snapshot_data, field_count, created_at, updated_at "
+            "FROM metadata_snapshots_old",
+            nullptr, nullptr, nullptr);
+
+        // 4. 删除旧表
+        sqlite3_exec(static_cast<sqlite3*>(db_),
+            "DROP TABLE metadata_snapshots_old",
+            nullptr, nullptr, nullptr);
+
+        Logger::instance().info("[BackupManager] migrate_schema: schema migrated to multi-operation");
+    }
 }
 
 bool BackupManager::is_field_blacklisted(const std::string& field_name) {
@@ -93,63 +169,39 @@ bool BackupManager::is_field_blacklisted(const std::string& field_name) {
 }
 
 bool BackupManager::has_snapshot(const std::string& track_id) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    
-    if (!healthy_) {
-        return false;
-    }
-    
-    const char* select_sql = "SELECT 1 FROM metadata_snapshots WHERE track_id = ? LIMIT 1";
-    
-    sqlite3_stmt* stmt = nullptr;
-    int rc = sqlite3_prepare_v2(
-        static_cast<sqlite3*>(db_),
-        select_sql,
-        -1,
-        &stmt,
-        nullptr
-    );
-    
-    if (rc != SQLITE_OK) {
-        return false;
-    }
-    
-    sqlite3_bind_text(stmt, 1, track_id.c_str(), -1, SQLITE_TRANSIENT);
-    
-    rc = sqlite3_step(stmt);
-    sqlite3_finalize(stmt);
-    
-    return rc == SQLITE_ROW;
+    // 兼容老接口：等价于"是否存在任意类型的快照"
+    return has_operation_snapshot(track_id, OperationType::Scrape);
 }
 
 bool BackupManager::save_snapshot(
     const std::string& track_id,
     const std::map<std::string, std::string>& snapshot
 ) {
-    Logger::instance().info("[BackupManager] save_snapshot: track_id=" + track_id.substr(0, 16) + "...");
-    
-    if (has_snapshot(track_id)) {
+    // 兼容老接口：等价于保存 Scrape 类型快照
+    Logger::instance().info("[BackupManager] save_snapshot(deprecated, use ensure_operation_snapshot): track_id=" + track_id.substr(0, 16) + "...");
+
+    if (has_operation_snapshot(track_id, OperationType::Scrape)) {
         Logger::instance().debug("[BackupManager] save_snapshot: already exists");
         return false;
     }
-    
+
     std::lock_guard<std::mutex> lock(mutex_);
-    
+
     if (!healthy_) {
         Logger::instance().error("[BackupManager] save_snapshot: not healthy");
         return false;
     }
-    
+
     std::string snapshot_json = serialize_snapshot(snapshot);
     std::string timestamp = get_current_timestamp();
     int field_count = static_cast<int>(snapshot.size());
-    
+
     const char* insert_sql = R"(
         INSERT INTO metadata_snapshots (
-            track_id, snapshot_data, field_count, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?)
+            track_id, operation_type, snapshot_data, field_count, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?)
     )";
-    
+
     sqlite3_stmt* stmt = nullptr;
     int rc = sqlite3_prepare_v2(
         static_cast<sqlite3*>(db_),
@@ -158,21 +210,22 @@ bool BackupManager::save_snapshot(
         &stmt,
         nullptr
     );
-    
+
     if (rc != SQLITE_OK) {
         Logger::instance().error("[BackupManager] save_snapshot: prepare failed: " + std::string(sqlite3_errmsg(static_cast<sqlite3*>(db_))));
         return false;
     }
-    
+
     sqlite3_bind_text(stmt, 1, track_id.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, 2, snapshot_json.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_int(stmt, 3, field_count);
-    sqlite3_bind_text(stmt, 4, timestamp.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 2, operation_type_to_string(OperationType::Scrape), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 3, snapshot_json.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 4, field_count);
     sqlite3_bind_text(stmt, 5, timestamp.c_str(), -1, SQLITE_TRANSIENT);
-    
+    sqlite3_bind_text(stmt, 6, timestamp.c_str(), -1, SQLITE_TRANSIENT);
+
     rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
-    
+
     if (rc != SQLITE_DONE) {
         if (rc == SQLITE_CONSTRAINT) {
             Logger::instance().debug("[BackupManager] save_snapshot: already exists (race condition)");
@@ -181,7 +234,7 @@ bool BackupManager::save_snapshot(
         }
         return false;
     }
-    
+
     Logger::instance().info("[BackupManager] save_snapshot: SUCCESS, field_count=" + std::to_string(field_count));
     return true;
 }
@@ -190,23 +243,41 @@ bool BackupManager::ensure_snapshot(
     const std::string& track_id,
     const std::map<std::string, std::string>& snapshot
 ) {
-    if (has_snapshot(track_id)) {
-        return true;
-    }
-    return save_snapshot(track_id, snapshot);
+    // 兼容老接口：等价于 ensure_operation_snapshot(track_id, Scrape, snapshot)
+    return ensure_operation_snapshot(track_id, OperationType::Scrape, snapshot);
 }
 
 std::map<std::string, std::string> BackupManager::get_snapshot(const std::string& track_id) {
+    return get_operation_snapshot(track_id, OperationType::Scrape);
+}
+
+std::optional<std::map<std::string, std::string>> BackupManager::rollback(
+    const std::string& track_id
+) {
+    return rollback_operation(track_id, OperationType::Scrape);
+}
+
+std::map<std::string, std::map<std::string, std::string>> BackupManager::batch_rollback(
+    const std::vector<std::string>& track_ids
+) {
+    return batch_rollback_operations(track_ids, OperationType::Scrape);
+}
+
+bool BackupManager::delete_snapshot(const std::string& track_id) {
+    return delete_operation_snapshot(track_id, OperationType::Scrape);
+}
+
+std::vector<std::string> BackupManager::get_all_tracks_with_snapshot() {
+    std::vector<std::string> track_ids;
+
     std::lock_guard<std::mutex> lock(mutex_);
-    
-    std::map<std::string, std::string> result;
-    
+
     if (!healthy_) {
-        return result;
+        return track_ids;
     }
-    
-    const char* select_sql = "SELECT snapshot_data FROM metadata_snapshots WHERE track_id = ?";
-    
+
+    const char* select_sql = "SELECT DISTINCT track_id FROM metadata_snapshots";
+
     sqlite3_stmt* stmt = nullptr;
     int rc = sqlite3_prepare_v2(
         static_cast<sqlite3*>(db_),
@@ -215,13 +286,172 @@ std::map<std::string, std::string> BackupManager::get_snapshot(const std::string
         &stmt,
         nullptr
     );
-    
+
     if (rc != SQLITE_OK) {
-        return result;
+        return track_ids;
     }
-    
+
+    while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+        const char* track_id = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+        if (track_id) {
+            track_ids.push_back(track_id);
+        }
+    }
+
+    sqlite3_finalize(stmt);
+    return track_ids;
+}
+
+int BackupManager::get_snapshot_count() {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    if (!healthy_) {
+        return 0;
+    }
+
+    const char* select_sql = "SELECT COUNT(*) FROM metadata_snapshots";
+
+    sqlite3_stmt* stmt = nullptr;
+    int rc = sqlite3_prepare_v2(
+        static_cast<sqlite3*>(db_),
+        select_sql,
+        -1,
+        &stmt,
+        nullptr
+    );
+
+    if (rc != SQLITE_OK) {
+        return 0;
+    }
+
+    int count = 0;
+    rc = sqlite3_step(stmt);
+    if (rc == SQLITE_ROW) {
+        count = sqlite3_column_int(stmt, 0);
+    }
+
+    sqlite3_finalize(stmt);
+    return count;
+}
+
+bool BackupManager::is_healthy() const {
+    return healthy_;
+}
+
+// ============= 多操作类型回滚接口实现 =============
+
+bool BackupManager::has_operation_snapshot(const std::string& track_id, OperationType op_type) {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    if (!healthy_) return false;
+
+    const char* sql = "SELECT 1 FROM metadata_snapshots WHERE track_id = ? AND operation_type = ? LIMIT 1";
+    sqlite3_stmt* stmt = nullptr;
+    int rc = sqlite3_prepare_v2(static_cast<sqlite3*>(db_), sql, -1, &stmt, nullptr);
+    if (rc != SQLITE_OK) return false;
+
     sqlite3_bind_text(stmt, 1, track_id.c_str(), -1, SQLITE_TRANSIENT);
-    
+    sqlite3_bind_text(stmt, 2, operation_type_to_string(op_type), -1, SQLITE_TRANSIENT);
+
+    rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    return rc == SQLITE_ROW;
+}
+
+bool BackupManager::ensure_operation_snapshot(
+    const std::string& track_id,
+    OperationType op_type,
+    const std::map<std::string, std::string>& snapshot
+) {
+    if (has_operation_snapshot(track_id, op_type)) {
+        return true;
+    }
+
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    if (!healthy_) {
+        Logger::instance().error("[BackupManager] ensure_operation_snapshot: not healthy");
+        return false;
+    }
+
+    // 再次检查（race condition 防护）
+    // 注意：不能调用 has_operation_snapshot，它会再次加锁同一 mutex 导致死锁
+    {
+        const char* check_sql = "SELECT 1 FROM metadata_snapshots WHERE track_id = ? AND operation_type = ? LIMIT 1";
+        sqlite3_stmt* check_stmt = nullptr;
+        int rc = sqlite3_prepare_v2(static_cast<sqlite3*>(db_), check_sql, -1, &check_stmt, nullptr);
+        if (rc == SQLITE_OK) {
+            sqlite3_bind_text(check_stmt, 1, track_id.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text(check_stmt, 2, operation_type_to_string(op_type), -1, SQLITE_TRANSIENT);
+            rc = sqlite3_step(check_stmt);
+            sqlite3_finalize(check_stmt);
+            if (rc == SQLITE_ROW) {
+                return true;
+            }
+        }
+    }
+
+    std::string snapshot_json = serialize_snapshot(snapshot);
+    std::string timestamp = get_current_timestamp();
+    int field_count = static_cast<int>(snapshot.size());
+
+    const char* insert_sql = R"(
+        INSERT INTO metadata_snapshots (
+            track_id, operation_type, snapshot_data, field_count, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?)
+    )";
+
+    sqlite3_stmt* stmt = nullptr;
+    int rc = sqlite3_prepare_v2(static_cast<sqlite3*>(db_), insert_sql, -1, &stmt, nullptr);
+    if (rc != SQLITE_OK) {
+        Logger::instance().error("[BackupManager] ensure_operation_snapshot: prepare failed: " +
+            std::string(sqlite3_errmsg(static_cast<sqlite3*>(db_))));
+        return false;
+    }
+
+    sqlite3_bind_text(stmt, 1, track_id.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 2, operation_type_to_string(op_type), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 3, snapshot_json.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 4, field_count);
+    sqlite3_bind_text(stmt, 5, timestamp.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 6, timestamp.c_str(), -1, SQLITE_TRANSIENT);
+
+    rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+
+    if (rc != SQLITE_DONE) {
+        if (rc == SQLITE_CONSTRAINT) {
+            // 并发竞争：已被其他线程插入
+            return true;
+        }
+        Logger::instance().error("[BackupManager] ensure_operation_snapshot: step failed: " +
+            std::string(sqlite3_errmsg(static_cast<sqlite3*>(db_))));
+        return false;
+    }
+
+    Logger::instance().info("[BackupManager] ensure_operation_snapshot: op=" +
+        std::string(operation_type_to_string(op_type)) +
+        ", track_id=" + track_id.substr(0, 16) + "..." +
+        ", field_count=" + std::to_string(field_count));
+    return true;
+}
+
+std::map<std::string, std::string> BackupManager::get_operation_snapshot(
+    const std::string& track_id, OperationType op_type
+) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::map<std::string, std::string> result;
+
+    if (!healthy_) return result;
+
+    const char* sql = "SELECT snapshot_data FROM metadata_snapshots WHERE track_id = ? AND operation_type = ?";
+    sqlite3_stmt* stmt = nullptr;
+    int rc = sqlite3_prepare_v2(static_cast<sqlite3*>(db_), sql, -1, &stmt, nullptr);
+    if (rc != SQLITE_OK) return result;
+
+    sqlite3_bind_text(stmt, 1, track_id.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 2, operation_type_to_string(op_type), -1, SQLITE_TRANSIENT);
+
     rc = sqlite3_step(stmt);
     if (rc == SQLITE_ROW) {
         const unsigned char* json_text = sqlite3_column_text(stmt, 0);
@@ -229,184 +459,183 @@ std::map<std::string, std::string> BackupManager::get_snapshot(const std::string
             result = deserialize_snapshot(reinterpret_cast<const char*>(json_text));
         }
     }
-    
     sqlite3_finalize(stmt);
     return result;
 }
 
-std::optional<std::map<std::string, std::string>> BackupManager::rollback(
-    const std::string& track_id
+std::optional<std::map<std::string, std::string>> BackupManager::rollback_operation(
+    const std::string& track_id, OperationType op_type
 ) {
-    auto snapshot = get_snapshot(track_id);
+    auto snapshot = get_operation_snapshot(track_id, op_type);
     if (snapshot.empty()) {
-        Logger::instance().warning("[BackupManager] rollback: no snapshot found for track " + track_id.substr(0, 16) + "...");
+        Logger::instance().warning("[BackupManager] rollback_operation: no snapshot for op=" +
+            std::string(operation_type_to_string(op_type)) +
+            ", track=" + track_id.substr(0, 16) + "...");
         return std::nullopt;
     }
-    
-    Logger::instance().info("[BackupManager] rollback: SUCCESS for track " + track_id.substr(0, 16) + "..., field_count=" + std::to_string(snapshot.size()));
+    Logger::instance().info("[BackupManager] rollback_operation: op=" +
+        std::string(operation_type_to_string(op_type)) +
+        ", track=" + track_id.substr(0, 16) + "..." +
+        ", field_count=" + std::to_string(snapshot.size()));
     return snapshot;
 }
 
-std::map<std::string, std::map<std::string, std::string>> BackupManager::batch_rollback(
-    const std::vector<std::string>& track_ids
+std::map<std::string, std::map<std::string, std::string>> BackupManager::batch_rollback_operations(
+    const std::vector<std::string>& track_ids, OperationType op_type
 ) {
     std::map<std::string, std::map<std::string, std::string>> results;
-    
-    if (track_ids.empty()) {
-        return results;
-    }
-    
+    if (track_ids.empty()) return results;
+
     std::lock_guard<std::mutex> lock(mutex_);
-    
-    if (!healthy_) {
-        return results;
-    }
-    
+    if (!healthy_) return results;
+
     std::ostringstream placeholders;
     for (size_t i = 0; i < track_ids.size(); ++i) {
         if (i > 0) placeholders << ",";
         placeholders << "?";
     }
-    
-    std::string select_sql = "SELECT track_id, snapshot_data FROM metadata_snapshots WHERE track_id IN (" + placeholders.str() + ")";
-    
+
+    std::string sql = "SELECT track_id, snapshot_data FROM metadata_snapshots "
+        "WHERE operation_type = ? AND track_id IN (" + placeholders.str() + ")";
+
     sqlite3_stmt* stmt = nullptr;
-    int rc = sqlite3_prepare_v2(
-        static_cast<sqlite3*>(db_),
-        select_sql.c_str(),
-        -1,
-        &stmt,
-        nullptr
-    );
-    
-    if (rc != SQLITE_OK) {
-        return results;
-    }
-    
+    int rc = sqlite3_prepare_v2(static_cast<sqlite3*>(db_), sql.c_str(), -1, &stmt, nullptr);
+    if (rc != SQLITE_OK) return results;
+
+    sqlite3_bind_text(stmt, 1, operation_type_to_string(op_type), -1, SQLITE_TRANSIENT);
     for (size_t i = 0; i < track_ids.size(); ++i) {
-        sqlite3_bind_text(stmt, static_cast<int>(i + 1), track_ids[i].c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, static_cast<int>(i + 2), track_ids[i].c_str(), -1, SQLITE_TRANSIENT);
     }
-    
+
     while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
-        const char* track_id = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+        const char* tid = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
         const unsigned char* json_text = sqlite3_column_text(stmt, 1);
-        
-        if (track_id && json_text) {
-            results[track_id] = deserialize_snapshot(reinterpret_cast<const char*>(json_text));
+        if (tid && json_text) {
+            results[tid] = deserialize_snapshot(reinterpret_cast<const char*>(json_text));
         }
     }
-    
     sqlite3_finalize(stmt);
-    
-    Logger::instance().info("[BackupManager] batch_rollback: found " + std::to_string(results.size()) + "/" + std::to_string(track_ids.size()) + " tracks");
+
+    Logger::instance().info("[BackupManager] batch_rollback_operations: op=" +
+        std::string(operation_type_to_string(op_type)) +
+        ", found " + std::to_string(results.size()) + "/" + std::to_string(track_ids.size()));
     return results;
 }
 
-bool BackupManager::delete_snapshot(const std::string& track_id) {
+bool BackupManager::delete_operation_snapshot(const std::string& track_id, OperationType op_type) {
     std::lock_guard<std::mutex> lock(mutex_);
-    
-    if (!healthy_) {
-        return false;
-    }
-    
-    const char* delete_sql = "DELETE FROM metadata_snapshots WHERE track_id = ?";
-    
+    if (!healthy_) return false;
+
+    const char* sql = "DELETE FROM metadata_snapshots WHERE track_id = ? AND operation_type = ?";
     sqlite3_stmt* stmt = nullptr;
-    int rc = sqlite3_prepare_v2(
-        static_cast<sqlite3*>(db_),
-        delete_sql,
-        -1,
-        &stmt,
-        nullptr
-    );
-    
-    if (rc != SQLITE_OK) {
-        return false;
-    }
-    
+    int rc = sqlite3_prepare_v2(static_cast<sqlite3*>(db_), sql, -1, &stmt, nullptr);
+    if (rc != SQLITE_OK) return false;
+
     sqlite3_bind_text(stmt, 1, track_id.c_str(), -1, SQLITE_TRANSIENT);
-    
+    sqlite3_bind_text(stmt, 2, operation_type_to_string(op_type), -1, SQLITE_TRANSIENT);
+
     rc = sqlite3_step(stmt);
     int changes = sqlite3_changes(static_cast<sqlite3*>(db_));
-    
     sqlite3_finalize(stmt);
-    
-    if (changes > 0) {
-        Logger::instance().info("[BackupManager] delete_snapshot: deleted for track " + track_id.substr(0, 16) + "...");
-    }
-    
+
     return changes > 0;
 }
 
-std::vector<std::string> BackupManager::get_all_tracks_with_snapshot() {
-    std::vector<std::string> track_ids;
-    
+std::vector<OperationType> BackupManager::get_operations_for_track(const std::string& track_id) {
+    std::vector<OperationType> ops;
     std::lock_guard<std::mutex> lock(mutex_);
-    
-    if (!healthy_) {
-        return track_ids;
-    }
-    
-    const char* select_sql = "SELECT track_id FROM metadata_snapshots";
-    
+    if (!healthy_) return ops;
+
+    const char* sql = "SELECT DISTINCT operation_type FROM metadata_snapshots WHERE track_id = ?";
     sqlite3_stmt* stmt = nullptr;
-    int rc = sqlite3_prepare_v2(
-        static_cast<sqlite3*>(db_),
-        select_sql,
-        -1,
-        &stmt,
-        nullptr
-    );
-    
-    if (rc != SQLITE_OK) {
-        return track_ids;
-    }
-    
+    int rc = sqlite3_prepare_v2(static_cast<sqlite3*>(db_), sql, -1, &stmt, nullptr);
+    if (rc != SQLITE_OK) return ops;
+
+    sqlite3_bind_text(stmt, 1, track_id.c_str(), -1, SQLITE_TRANSIENT);
+
     while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
-        const char* track_id = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
-        if (track_id) {
-            track_ids.push_back(track_id);
+        const char* op_str = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+        if (op_str) {
+            ops.push_back(operation_type_from_string(op_str));
         }
     }
-    
     sqlite3_finalize(stmt);
-    return track_ids;
+    return ops;
 }
 
-int BackupManager::get_snapshot_count() {
+std::map<std::string, std::vector<OperationType>> BackupManager::get_operations_for_tracks(
+    const std::vector<std::string>& track_ids
+) {
+    std::map<std::string, std::vector<OperationType>> results;
+    if (track_ids.empty()) {
+        Logger::instance().warning("[BackupManager] get_operations_for_tracks: empty track_ids");
+        return results;
+    }
+
     std::lock_guard<std::mutex> lock(mutex_);
-    
     if (!healthy_) {
-        return 0;
+        Logger::instance().warning("[BackupManager] get_operations_for_tracks: not healthy");
+        return results;
     }
-    
-    const char* select_sql = "SELECT COUNT(*) FROM metadata_snapshots";
-    
+
+    std::ostringstream placeholders;
+    for (size_t i = 0; i < track_ids.size(); ++i) {
+        if (i > 0) placeholders << ",";
+        placeholders << "?";
+    }
+
+    std::string sql = "SELECT track_id, operation_type FROM metadata_snapshots WHERE track_id IN (" +
+        placeholders.str() + ")";
+    Logger::instance().info("[BackupManager] get_operations_for_tracks: querying " +
+        std::to_string(track_ids.size()) + " track_ids, first track_id=" +
+        (track_ids.empty() ? std::string("<empty>") : track_ids[0].substr(0, 16)) + "...");
+
     sqlite3_stmt* stmt = nullptr;
-    int rc = sqlite3_prepare_v2(
-        static_cast<sqlite3*>(db_),
-        select_sql,
-        -1,
-        &stmt,
-        nullptr
-    );
-    
+    int rc = sqlite3_prepare_v2(static_cast<sqlite3*>(db_), sql.c_str(), -1, &stmt, nullptr);
     if (rc != SQLITE_OK) {
-        return 0;
+        Logger::instance().error("[BackupManager] get_operations_for_tracks: prepare failed: " +
+            std::string(sqlite3_errmsg(static_cast<sqlite3*>(db_))));
+        return results;
     }
-    
-    int count = 0;
-    rc = sqlite3_step(stmt);
-    if (rc == SQLITE_ROW) {
-        count = sqlite3_column_int(stmt, 0);
+
+    for (size_t i = 0; i < track_ids.size(); ++i) {
+        sqlite3_bind_text(stmt, static_cast<int>(i + 1), track_ids[i].c_str(), -1, SQLITE_TRANSIENT);
     }
-    
+
+    int row_count = 0;
+    while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+        const char* tid = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+        const char* op_str = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+        if (tid && op_str) {
+            results[tid].push_back(operation_type_from_string(op_str));
+            row_count++;
+        }
+    }
     sqlite3_finalize(stmt);
-    return count;
+
+    Logger::instance().info("[BackupManager] get_operations_for_tracks: returned " +
+        std::to_string(results.size()) + " track entries, " + std::to_string(row_count) + " total rows");
+    return results;
 }
 
-bool BackupManager::is_healthy() const {
-    return healthy_;
+int BackupManager::delete_all_operation_snapshots(OperationType op_type) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!healthy_) return 0;
+
+    const char* sql = "DELETE FROM metadata_snapshots WHERE operation_type = ?";
+    sqlite3_stmt* stmt = nullptr;
+    int rc = sqlite3_prepare_v2(static_cast<sqlite3*>(db_), sql, -1, &stmt, nullptr);
+    if (rc != SQLITE_OK) return 0;
+
+    sqlite3_bind_text(stmt, 1, operation_type_to_string(op_type), -1, SQLITE_TRANSIENT);
+    rc = sqlite3_step(stmt);
+    int changes = sqlite3_changes(static_cast<sqlite3*>(db_));
+    sqlite3_finalize(stmt);
+
+    Logger::instance().info("[BackupManager] delete_all_operation_snapshots: op=" +
+        std::string(operation_type_to_string(op_type)) +
+        ", deleted " + std::to_string(changes) + " records");
+    return changes;
 }
 
 std::string BackupManager::serialize_snapshot(

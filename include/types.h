@@ -12,10 +12,12 @@ namespace ai_metadata {
 
 /**
  * @brief 音轨分析选项结构体
+ *
+ * V8.2: classify_genre / identify_edition 已移除。
+ * - genre 由 Stage1 从 MusicBrainz 抓取
+ * - edition 已废弃（AI 推断不可靠）
  */
 struct TrackOptions {
-    bool classify_genre = true;
-    bool identify_edition = true;
     bool translate_metadata = true;
 };
 
@@ -69,6 +71,11 @@ struct ScrapingOptions {
 
 /**
  * @brief V8新增：增强选项结构体 - 阶段二
+ *
+ * V8.2: classify_genre / identify_edition 已移除。
+ * - genre 由 Stage1 从 MusicBrainz 抓取
+ * - edition 已废弃
+ * Stage2 仅做翻译（基于已有元数据生成新价值）。
  */
 struct EnhancementOptions {
     // 翻译
@@ -76,11 +83,7 @@ struct EnhancementOptions {
     bool translate_album = true;
     bool translate_artist = true;
     std::string target_language = "zh";
-    
-    // 分类识别
-    bool classify_genre = true;
-    bool identify_edition = true;
-    
+
     // 其他增强
     bool scrape_mood = false;
     bool scrape_bpm = false;
@@ -137,18 +140,12 @@ struct FailedTrackInfo {
 struct EnhancementResult {
     std::string track_id;
     bool success = false;
-    
+
     std::string title_zh;
     std::string album_zh;
     std::string artist_zh;
     float translation_confidence = 0.0f;
-    
-    std::string genre_value;
-    float genre_confidence = 0.0f;
-    
-    std::string edition_value;
-    float edition_confidence = 0.0f;
-    
+
     std::string error;
 };
 
@@ -202,7 +199,9 @@ struct GenreResult {
 };
 
 /**
- * @brief 版本识别结果结构体
+ * @brief 版本识别结果结构体（V8.2 已废弃）
+ *
+ * 保留此结构体仅用于向后兼容旧数据/JSON。Stage2 不再产出 edition。
  */
 struct EditionResult {
     std::string value;      ///< 版本类型
@@ -220,10 +219,12 @@ struct TranslationResult {
 
 /**
  * @brief AI分析结果结构体
+ *
+ * V8.2: edition 字段已移除（已废弃）。
+ * genre 字段保留作为兼容（实际 genre 由 Stage1 抓取，不在此结果中产出）。
  */
 struct AIResult {
-    GenreResult genre;              ///< 流派结果
-    EditionResult edition;          ///< 版本结果
+    GenreResult genre;              ///< 流派结果（兼容字段，Stage2 不再产出）
     TranslationResult translation;  ///< 翻译结果
     double translation_confidence = 0.0; ///< 翻译置信度
 };
@@ -262,6 +263,70 @@ struct TrackAnalysisResult {
     OriginalMetadata original; ///< 原始元数据
     AIResult ai;               ///< AI分析结果
     AnalysisInfo analysis_info; ///< 分析信息
+};
+
+// ==================== Normalize 类型 ====================
+
+/**
+ * @brief Normalize 候选项：一个 alias 及其代表歌曲/专辑上下文
+ */
+struct NormalizeCandidate {
+    std::string alias;                                  ///< 原始写法
+    std::vector<std::map<std::string, std::string>> examples; ///< 上下文（title/album 等），辅助 AI 判断
+};
+
+/**
+ * @brief Normalize 选项
+ */
+struct NormalizeOptions {
+    std::string field = "artist";       ///< 目标字段（artist/album_artist/album/genre/label/composer/publisher）
+    int max_examples_per_alias = 3;     ///< 每个 alias 最多带几首歌
+    int max_albums_per_alias = 2;       ///< 每个 alias 最多带几张专辑
+    float auto_apply_threshold = 1.0f;  ///< 置信度阈值，>=此值自动应用（1.0=总需确认）
+};
+
+/**
+ * @brief Normalize 分组：一组被判为同一实体的 alias
+ */
+struct NormalizeGroup {
+    std::string canonical_name;         ///< 推荐标准写法
+    float confidence = 0.0f;            ///< AI 置信度
+    std::vector<std::string> aliases;   ///< 同一实体的所有写法
+    std::string reason;                 ///< AI 给出的归并理由
+};
+
+/**
+ * @brief Normalize 不确定项
+ */
+struct NormalizeUncertain {
+    std::string alias;                  ///< 不确定的 alias
+    std::string reason;                 ///< 不确定的原因
+};
+
+/**
+ * @brief Normalize 单个 track 的写入指令
+ *
+ * 由 Python 端根据最终 groups 和每个 track 的当前 field values 构造，
+ * C++ 端直接用 new_values 写入 tag，无需再做 alias_to_canonical 匹配。
+ * 这样避免 C++ 端因 Unicode 表示差异（NFC/NFD 韩文、尾部全角空格等）
+ * 导致 alias_to_canonical.find(val) 漏匹配。
+ */
+struct NormalizeTrackUpdate {
+    int track_index = -1;                       ///< 在原始 m_tracks 中的索引
+    std::string track_id;                       ///< 音轨 ID
+    bool matched = false;                       ///< 是否有任何 value 被替换
+    std::vector<std::string> original_values;   ///< 原始 values
+    std::vector<std::string> new_values;        ///< 目标 values（已替换 canonical，去重）
+    std::string canonical_name;                 ///< 命中的 canonical（如有多个取第一个）
+};
+
+/**
+ * @brief Normalize 结果
+ */
+struct NormalizeResult {
+    std::vector<NormalizeGroup> groups;                 ///< 已分组建议
+    std::vector<NormalizeUncertain> uncertain;          ///< 无法判定的 alias
+    std::vector<NormalizeTrackUpdate> track_updates;    ///< 每个 track 的写入指令
 };
 
 /**

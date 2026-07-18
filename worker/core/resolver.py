@@ -8,80 +8,13 @@ AI-powered decision layer for metadata selection from candidates
 import json
 import logging
 from typing import List, Dict, Any, Optional
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
-from data_sources.base import Candidate, QueryInput, DataSourceType
+from data_sources.base import Candidate, QueryInput, DataSourceType, FinalResult
 from common.text_utils import clean_value
 from prompts import get_composer
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class FinalResult:
-    """最终元数据结果
-    
-    Attributes:
-        title: 歌曲标题
-        artist: 艺术家名称
-        album: 专辑名称
-        year: 发行年份
-        track_number: 音轨号
-        disc_number: 光盘号
-        genre: 流派
-        composer: 作曲家
-        lyricist: 作词家
-        label: 厂牌
-        country: 发行国家
-        catalog_number: 目录号
-        musicbrainz_id: MusicBrainz ID
-        confidence: 置信度 (0.0-1.0)
-        source: 结果来源类型
-        sources: 多源融合时的来源列表
-        is_fallback: 是否为降级结果
-        reasoning: AI决策推理说明
-    """
-    title: str = ""
-    artist: str = ""
-    album: str = ""
-    year: str = ""
-    track_number: str = ""
-    disc_number: str = ""
-    genre: str = ""
-    composer: str = ""
-    lyricist: str = ""
-    label: str = ""
-    country: str = ""
-    catalog_number: str = ""
-    musicbrainz_id: str = ""
-    confidence: float = 0.0
-    source: DataSourceType = DataSourceType.AI
-    sources: List[DataSourceType] = field(default_factory=list)
-    is_fallback: bool = False
-    reasoning: str = ""
-    
-    def to_dict(self) -> Dict[str, Any]:
-        """转换为字典"""
-        return {
-            "title": self.title,
-            "artist": self.artist,
-            "album": self.album,
-            "year": self.year,
-            "track_number": self.track_number,
-            "disc_number": self.disc_number,
-            "genre": self.genre,
-            "composer": self.composer,
-            "lyricist": self.lyricist,
-            "label": self.label,
-            "country": self.country,
-            "catalog_number": self.catalog_number,
-            "musicbrainz_id": self.musicbrainz_id,
-            "confidence": self.confidence,
-            "source": self.source.value if isinstance(self.source, DataSourceType) else self.source,
-            "sources": [s.value if isinstance(s, DataSourceType) else s for s in self.sources],
-            "is_fallback": self.is_fallback,
-            "reasoning": self.reasoning
-        }
 
 
 @dataclass
@@ -441,8 +374,8 @@ Remember:
             catalog_number=catalog_number,
             musicbrainz_id=mb_id,
             confidence=min(confidence, 0.95),
-            source=primary_source,
-            sources=sources,
+            source=primary_source.value if isinstance(primary_source, DataSourceType) else str(primary_source),
+            sources=[s.value if isinstance(s, DataSourceType) else str(s) for s in sources],
             is_fallback=False
         )
         
@@ -489,8 +422,8 @@ Remember:
             catalog_number=best.catalog_number,
             musicbrainz_id=best.musicbrainz_id,
             confidence=best.confidence,
-            source=best.source,
-            sources=sources,
+            source=best.source.value if isinstance(best.source, DataSourceType) else str(best.source),
+            sources=[s.value if isinstance(s, DataSourceType) else str(s) for s in sources],
             is_fallback=False
         )
     
@@ -509,7 +442,7 @@ Remember:
             artist=query.artist,
             album=query.album,
             confidence=0.0,
-            source=DataSourceType.AI,
+            source=DataSourceType.AI.value,
             sources=[],
             is_fallback=True
         )

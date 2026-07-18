@@ -543,10 +543,6 @@ def process_stage2_enhance(request: Dict) -> Dict:
                         album_zh=r.get("album_zh", ""),
                         artist_zh=r.get("artist_zh", ""),
                         translation_confidence=r.get("translation_confidence", 0.0),
-                        genre_value=r.get("genre_value", ""),
-                        genre_confidence=r.get("genre_confidence", 0.0),
-                        edition_value=r.get("edition_value", ""),
-                        edition_confidence=r.get("edition_confidence", 0.0),
                         model=r.get("model", ""),
                         model_type=r.get("model_type", ""),
                         tokens_used=r.get("tokens_used", 0),
@@ -568,6 +564,82 @@ def process_stage2_enhance(request: Dict) -> Dict:
         logger.error(f"Error in stage2_enhance: {e}", exc_info=True)
         clear_abort_task()
         return create_error_response(request_id, "ENHANCE_ERROR", str(e))
+
+
+def process_normalize(request: Dict) -> Dict:
+    """处理 normalize 请求 - 元数据实体归一化
+
+    接收一批未知 alias 及其上下文 examples，调用 AI 推断哪些 alias 属于同一实体，
+    返回 groups（已分组）+ uncertain（无法判定）。
+
+    请求结构：
+        {
+            "method": "normalize",
+            "params": {
+                "field": "artist",
+                "candidates": [
+                    {"alias": "华仔", "examples": [{"title": "忘情水", "album": "忘情水"}]},
+                    ...
+                ]
+            }
+        }
+
+    响应结构：
+        {
+            "success": True,
+            "result": {
+                "groups": [{"canonical_name": "...", "confidence": 0.99, "aliases": [...], "reason": "..."}],
+                "uncertain": [{"alias": "...", "reason": "..."}]
+            }
+        }
+    """
+    from core import NormalizeProcessor
+
+    request_id = request.get("id", str(uuid.uuid4()))
+    task_id = request.get("task_id", request_id)
+    params = request.get("params", {})
+    field = params.get("field", "artist")
+    candidates = params.get("candidates", [])
+    known_groups = params.get("known_groups", [])
+    track_values = params.get("track_values", [])
+
+    logger.info(
+        f"process_normalize: Request ID = {request_id}, Task ID = {task_id}, "
+        f"field = {field}, candidates = {len(candidates)}, "
+        f"known_groups = {len(known_groups)}, track_values = {len(track_values)}"
+    )
+
+    # candidates 和 known_groups 都为空时才算无效请求。
+    # candidates 为空但 known_groups 非空是合法场景：所有 alias 都被 SQLite 命中，
+    # 此时 Python 仍需根据 known_groups + track_values 构造 track_updates 返回给 C++。
+    if not candidates and not known_groups:
+        return create_error_response(request_id, "INVALID_JSON", "No candidates and known_groups provided", task_id=task_id)
+
+    try:
+        processor = NormalizeProcessor(config.config)
+        result = processor.process(request)
+
+        # NormalizeProcessor 返回的 dict 已包含 id/task_id/success/result
+        if not result.get("success", False):
+            err = result.get("error", {})
+            return create_error_response(
+                request_id,
+                err.get("code", "NORMALIZE_ERROR"),
+                err.get("message", "Unknown normalize error"),
+                task_id=task_id,
+            )
+
+        # 包装为 IPC 响应格式
+        return create_response(
+            request_id,
+            success=True,
+            results=[result["result"]],
+            task_id=task_id,
+        )
+
+    except Exception as e:
+        logger.error(f"Error in normalize: {e}", exc_info=True)
+        return create_error_response(request_id, "NORMALIZE_ERROR", str(e), task_id=task_id)
 
 
 def handle_request(request: Dict) -> Optional[Dict]:
@@ -599,6 +671,8 @@ def handle_request(request: Dict) -> Optional[Dict]:
         return process_stage1_scrape(request)
     elif method == "stage2_enhance":
         return process_stage2_enhance(request)
+    elif method == "normalize":
+        return process_normalize(request)
     elif method == "set_log_level":
         return process_set_log_level(request)
     else:

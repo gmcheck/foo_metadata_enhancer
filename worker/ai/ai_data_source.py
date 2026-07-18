@@ -84,29 +84,57 @@ class AIAdapter(DataSourceAdapter):
         Returns:
             List[Candidate]: 候选列表（通常只包含一个候选）
         """
-        logger.debug(f"AIAdapter::search_candidates: title='{query.title}', artist='{query.artist}'")
-        
+        logger.info(
+            f"AIAdapter::search_candidates: BEGIN, "
+            f"title='{query.title}', artist='{query.artist}', album='{query.album}', "
+            f"duration={query.duration}"
+        )
+
         if not self._model_adapter:
-            logger.warning("AI model adapter not initialized")
+            logger.warning("AIAdapter::search_candidates: model_adapter is None, cannot call AI")
             return []
-        
+
         messages = self._build_candidates_prompt(query)
-        
+        logger.info(
+            f"AIAdapter::search_candidates: calling AI, "
+            f"system_prompt_len={len(messages[0]['content']) if messages else 0}, "
+            f"user_prompt_len={len(messages[1]['content']) if len(messages) > 1 else 0}"
+        )
+
         try:
             result = self._model_adapter.analyze(messages)
-            
+
             if not result.success:
-                logger.warning(f"AI analysis failed: {result.error}")
+                logger.warning(
+                    f"AIAdapter::search_candidates: AI call FAILED, "
+                    f"error={result.error}, model={getattr(result, 'model', 'unknown')}"
+                )
                 return []
-            
+
+            logger.info(
+                f"AIAdapter::search_candidates: AI call OK, "
+                f"model={result.model}, tokens={result.tokens_used}, "
+                f"result_type={type(result.result).__name__}, "
+                f"result_size={len(str(result.result)) if result.result else 0}"
+            )
+
             candidate = self._parse_ai_result_to_candidate(result.result, result.model, query)
-            
+
             if candidate:
+                logger.info(
+                    f"AIAdapter::search_candidates: parsed candidate, "
+                    f"title='{candidate.title[:40]}', artist='{candidate.artist[:40]}', "
+                    f"album='{candidate.album[:40]}'"
+                )
                 return [candidate]
+            logger.warning("AIAdapter::search_candidates: parsed candidate is None")
             return []
-        
+
         except Exception as e:
-            logger.error(f"AIAdapter search_candidates error: {e}")
+            logger.error(
+                f"AIAdapter::search_candidates: EXCEPTION {type(e).__name__}: {e}",
+                exc_info=True
+            )
             return []
     
     def _build_candidates_prompt(self, query: QueryInput) -> List[Dict[str, str]]:
@@ -133,28 +161,36 @@ Only include fields you can confidently identify."""
             {"role": "user", "content": user_content}
         ]
     
-    def _parse_ai_result_to_candidate(self, result: Dict[str, Any],
+    def _parse_ai_result_to_candidate(self, result: Any,
                                        model: str,
                                        query: QueryInput) -> Optional[Candidate]:
         """将 AI 结果解析为候选对象
-        
+
         Args:
-            result: AI 返回的 JSON 结果
+            result: AI 返回的 JSON 结果（dict 或 list[dict]）
             model: 使用的模型名称
             query: 原始查询输入
-        
+
         Returns:
             Optional[Candidate]: 候选对象
         """
         if not result:
             return None
-        
+
+        # AI 偶尔不遵守 schema 返回 list（如 [{...}]），取第一个 dict 元素
+        if isinstance(result, list):
+            result = next((x for x in result if isinstance(x, dict)), None)
+            if result is None:
+                return None
+        elif not isinstance(result, dict):
+            return None
+
         def get_field_value(field_name: str) -> str:
             field_data = result.get(field_name, {})
             if isinstance(field_data, dict):
                 return clean_value(field_data.get("value", ""))
             return ""
-        
+
         def get_field_confidence(field_name: str) -> float:
             field_data = result.get(field_name, {})
             if isinstance(field_data, dict):

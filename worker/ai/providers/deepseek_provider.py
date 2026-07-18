@@ -26,6 +26,9 @@ class DeepSeekProvider(OpenAIProvider):
 
     DEFAULT_BASE_URL = "https://api.deepseek.com/v1/chat/completions"
 
+    # DeepSeek 端点不兼容 OpenAI Responses API，禁用 web_search 路径
+    supports_web_search = False
+
     SUPPORTED_MODELS = [
         "deepseek-chat",
         "deepseek-reasoner",

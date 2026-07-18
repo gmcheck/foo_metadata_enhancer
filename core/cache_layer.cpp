@@ -237,10 +237,6 @@ void CacheLayer::create_tables() {
             album_zh TEXT,
             artist_zh TEXT,
             translation_confidence REAL DEFAULT 0.0,
-            genre_value TEXT,
-            genre_confidence REAL DEFAULT 0.0,
-            edition_value TEXT,
-            edition_confidence REAL DEFAULT 0.0,
             error_code TEXT,
             error_message TEXT,
             cache_hit_count INTEGER DEFAULT 0,
@@ -251,8 +247,26 @@ void CacheLayer::create_tables() {
     )";
     
     sqlite3_exec(db_, create_stage2_cache_table, nullptr, nullptr, nullptr);
-    
-    std::string init_config_sql = 
+
+    // Normalize 知识库表：保存用户确认过的 alias → canonical 映射
+    const char* create_normalize_alias_table = R"(
+        CREATE TABLE IF NOT EXISTS normalize_alias (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            field           TEXT NOT NULL,
+            alias_name      TEXT NOT NULL,
+            canonical_name  TEXT NOT NULL,
+            source          TEXT DEFAULT 'ai',
+            confidence      REAL DEFAULT 1.0,
+            confirmed       INTEGER DEFAULT 1,
+            reason          TEXT,
+            created_time    TEXT NOT NULL,
+            updated_time    TEXT NOT NULL,
+            UNIQUE(field, alias_name)
+        )
+    )";
+    sqlite3_exec(db_, create_normalize_alias_table, nullptr, nullptr, nullptr);
+
+    std::string init_config_sql =
         "INSERT OR IGNORE INTO cache_config (key, value, created_at, updated_at) VALUES "
         "('version', '1', datetime('now'), datetime('now')), "
         "('expiration_days', '365', datetime('now'), datetime('now')), "
@@ -266,7 +280,9 @@ void CacheLayer::create_indexes() {
     const char* indexes[] = {
         "CREATE INDEX IF NOT EXISTS idx_stat_date ON cache_statistics(stat_date)",
         "CREATE INDEX IF NOT EXISTS idx_stage1_cache_key ON stage1_cache(cache_key)",
-        "CREATE INDEX IF NOT EXISTS idx_stage2_cache_key ON stage2_cache(cache_key)"
+        "CREATE INDEX IF NOT EXISTS idx_stage2_cache_key ON stage2_cache(cache_key)",
+        "CREATE INDEX IF NOT EXISTS idx_normalize_field_alias ON normalize_alias(field, alias_name)",
+        "CREATE INDEX IF NOT EXISTS idx_normalize_canonical ON normalize_alias(field, canonical_name)"
     };
     
     for (const char* idx : indexes) {
@@ -296,6 +312,7 @@ void CacheLayer::clear_all() {
     sqlite3_exec(db_, "DELETE FROM stage1_cache", nullptr, nullptr, nullptr);
     sqlite3_exec(db_, "DELETE FROM stage2_cache", nullptr, nullptr, nullptr);
     sqlite3_exec(db_, "DELETE FROM cache_statistics", nullptr, nullptr, nullptr);
+    // 注意：normalize_alias 是知识库，不随缓存清空
 }
 
 int CacheLayer::clear_by_track_ids(const std::vector<std::string>& track_ids) {
@@ -613,16 +630,16 @@ std::optional<Stage2CacheEntry> CacheLayer::get_stage2(const std::string& cache_
     if (!db_) return std::nullopt;
     
     const char* sql = "SELECT track_id, file_path, title, artist, album, success, title_zh, album_zh, artist_zh, "
-                      "translation_confidence, genre_value, genre_confidence, edition_value, edition_confidence, error_code, error_message "
+                      "translation_confidence, error_code, error_message "
                       "FROM stage2_cache WHERE cache_key = ?";
     sqlite3_stmt* stmt = nullptr;
-    
+
     if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) {
         return std::nullopt;
     }
-    
+
     sqlite3_bind_text(stmt, 1, cache_key.c_str(), -1, SQLITE_TRANSIENT);
-    
+
     if (sqlite3_step(stmt) == SQLITE_ROW) {
         Stage2CacheEntry entry;
         entry.track_id = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
@@ -637,16 +654,12 @@ std::optional<Stage2CacheEntry> CacheLayer::get_stage2(const std::string& cache_
         entry.album_zh = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 7));
         entry.artist_zh = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 8));
         entry.translation_confidence = static_cast<float>(sqlite3_column_double(stmt, 9));
-        entry.genre_value = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 10));
-        entry.genre_confidence = static_cast<float>(sqlite3_column_double(stmt, 11));
-        entry.edition_value = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 12));
-        entry.edition_confidence = static_cast<float>(sqlite3_column_double(stmt, 13));
-        
-        if (sqlite3_column_type(stmt, 14) != SQLITE_NULL) {
-            entry.error_code = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 14));
+
+        if (sqlite3_column_type(stmt, 10) != SQLITE_NULL) {
+            entry.error_code = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 10));
         }
-        if (sqlite3_column_type(stmt, 15) != SQLITE_NULL) {
-            entry.error_message = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 15));
+        if (sqlite3_column_type(stmt, 11) != SQLITE_NULL) {
+            entry.error_message = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 11));
         }
         
         sqlite3_finalize(stmt);
@@ -684,10 +697,10 @@ void CacheLayer::set_stage2(const std::string& cache_key, const Stage2CacheEntry
     std::ostringstream oss;
     oss << std::fixed << std::setprecision(6);
     
-    std::string sql = 
+    std::string sql =
         "INSERT OR REPLACE INTO stage2_cache (cache_key, track_id, file_path, title, artist, album, "
         "success, title_zh, album_zh, artist_zh, translation_confidence, "
-        "genre_value, genre_confidence, edition_value, edition_confidence, error_code, error_message, "
+        "error_code, error_message, "
         "cache_hit_count, last_accessed_at, created_at, updated_at) VALUES ("
         "'" + escape_sql(cache_key) + "', "
         "'" + escape_sql(entry.track_id) + "', "
@@ -700,10 +713,6 @@ void CacheLayer::set_stage2(const std::string& cache_key, const Stage2CacheEntry
         "'" + escape_sql(entry.album_zh) + "', "
         "'" + escape_sql(entry.artist_zh) + "', "
         + std::to_string(entry.translation_confidence) + ", "
-        "'" + escape_sql(entry.genre_value) + "', "
-        + std::to_string(entry.genre_confidence) + ", "
-        "'" + escape_sql(entry.edition_value) + "', "
-        + std::to_string(entry.edition_confidence) + ", "
         "'" + escape_sql(entry.error_code) + "', "
         "'" + escape_sql(entry.error_message) + "', "
         "0, datetime('now'), datetime('now'), datetime('now'))";
@@ -712,6 +721,132 @@ void CacheLayer::set_stage2(const std::string& cache_key, const Stage2CacheEntry
     if (sqlite3_exec(db_, sql.c_str(), nullptr, nullptr, &err_msg) != SQLITE_OK) {
         if (err_msg) sqlite3_free(err_msg);
     }
+}
+
+// ==================== Normalize Alias ====================
+
+std::vector<AliasEntry> CacheLayer::get_aliases(
+    const std::string& field,
+    const std::vector<std::string>& alias_names
+) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<AliasEntry> result;
+    if (!db_ || alias_names.empty()) return result;
+
+    auto escape_sql = [](const std::string& s) -> std::string {
+        std::string r;
+        r.reserve(s.size() * 2);
+        for (char c : s) {
+            if (c == '\'') r += "''";
+            else r += c;
+        }
+        return r;
+    };
+
+    std::string sql = "SELECT field, alias_name, canonical_name, source, confidence, confirmed, reason "
+                      "FROM normalize_alias WHERE field = '" + escape_sql(field) + "' AND alias_name IN (";
+    for (size_t i = 0; i < alias_names.size(); ++i) {
+        if (i > 0) sql += ",";
+        sql += "'" + escape_sql(alias_names[i]) + "'";
+    }
+    sql += ")";
+
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) == SQLITE_OK) {
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            AliasEntry e;
+            e.field        = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+            e.alias_name   = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+            e.canonical_name = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
+            e.source       = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
+            e.confidence   = static_cast<float>(sqlite3_column_double(stmt, 4));
+            e.confirmed    = sqlite3_column_int(stmt, 5) != 0;
+            const unsigned char* reason = sqlite3_column_text(stmt, 6);
+            e.reason       = reason ? reinterpret_cast<const char*>(reason) : "";
+            result.push_back(std::move(e));
+        }
+        sqlite3_finalize(stmt);
+    }
+    return result;
+}
+
+bool CacheLayer::upsert_alias(const AliasEntry& entry) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!db_) return false;
+
+    auto escape_sql = [](const std::string& s) -> std::string {
+        std::string r;
+        r.reserve(s.size() * 2);
+        for (char c : s) {
+            if (c == '\'') r += "''";
+            else r += c;
+        }
+        return r;
+    };
+
+    std::ostringstream oss;
+    oss << std::fixed << std::setprecision(6);
+    oss << "INSERT OR REPLACE INTO normalize_alias "
+        << "(field, alias_name, canonical_name, source, confidence, confirmed, reason, created_time, updated_time) VALUES ("
+        << "'" << escape_sql(entry.field) << "', "
+        << "'" << escape_sql(entry.alias_name) << "', "
+        << "'" << escape_sql(entry.canonical_name) << "', "
+        << "'" << escape_sql(entry.source) << "', "
+        << entry.confidence << ", "
+        << (entry.confirmed ? 1 : 0) << ", "
+        << "'" << escape_sql(entry.reason) << "', "
+        << "datetime('now'), datetime('now'))";
+
+    char* err_msg = nullptr;
+    bool ok = sqlite3_exec(db_, oss.str().c_str(), nullptr, nullptr, &err_msg) == SQLITE_OK;
+    if (!ok && err_msg) sqlite3_free(err_msg);
+    return ok;
+}
+
+bool CacheLayer::batch_upsert_aliases(const std::vector<AliasEntry>& entries) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!db_ || entries.empty()) return false;
+
+    auto escape_sql = [](const std::string& s) -> std::string {
+        std::string r;
+        r.reserve(s.size() * 2);
+        for (char c : s) {
+            if (c == '\'') r += "''";
+            else r += c;
+        }
+        return r;
+    };
+
+    sqlite3_exec(db_, "BEGIN", nullptr, nullptr, nullptr);
+    bool all_ok = true;
+
+    for (const auto& entry : entries) {
+        std::ostringstream oss;
+        oss << std::fixed << std::setprecision(6);
+        oss << "INSERT OR REPLACE INTO normalize_alias "
+            << "(field, alias_name, canonical_name, source, confidence, confirmed, reason, created_time, updated_time) VALUES ("
+            << "'" << escape_sql(entry.field) << "', "
+            << "'" << escape_sql(entry.alias_name) << "', "
+            << "'" << escape_sql(entry.canonical_name) << "', "
+            << "'" << escape_sql(entry.source) << "', "
+            << entry.confidence << ", "
+            << (entry.confirmed ? 1 : 0) << ", "
+            << "'" << escape_sql(entry.reason) << "', "
+            << "datetime('now'), datetime('now'))";
+
+        char* err_msg = nullptr;
+        if (sqlite3_exec(db_, oss.str().c_str(), nullptr, nullptr, &err_msg) != SQLITE_OK) {
+            all_ok = false;
+            if (err_msg) sqlite3_free(err_msg);
+        }
+    }
+
+    if (all_ok) {
+        sqlite3_exec(db_, "COMMIT", nullptr, nullptr, nullptr);
+    } else {
+        sqlite3_exec(db_, "ROLLBACK", nullptr, nullptr, nullptr);
+    }
+    return all_ok;
 }
 
 }

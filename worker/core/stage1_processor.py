@@ -1,8 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Stage 1 Processor
-Basic metadata processing and correction
+Stage 1 Processor (Scrape Layer)
+从外部数据源获取本地没有的数据（事实获取）。
+
+V8.2 三功能边界：
+  - 本处理器属于 Scrape 层。
+  - 数据源：MusicBrainz / Discogs / AI 降级。
+  - 产物：title / artist / album / year / genre / composer / ... / musicbrainz_id。
+  - V8.2 变更：genre 改由本层从 MusicBrainz recording 详情获取。
+  - 不做：翻译（归 Stage2 Enhancer）、归一化（归 Normalize）。
 
 V8.1 Architecture:
     Cache → DataSourceManager(并发) → Aggregator → AIResolver
@@ -22,6 +29,7 @@ from data_sources import (
 )
 from .aggregator import CandidateAggregator
 from .resolver import AIResolver, FinalResult
+from .types import TrackInput
 from common.result_formatter import ResultFormatter
 from abort_checker import is_aborted
 from common.models import (
@@ -31,84 +39,6 @@ from common.models import (
 )
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class TrackInput:
-    """音轨输入数据"""
-    track_id: str
-    title: str = ""
-    artist: str = ""
-    album: str = ""
-    album_artist: str = ""
-    year: str = ""
-    genre: str = ""
-    track_number: int = 0
-    disc_number: int = 0
-    duration_sec: int = 0
-    comment: str = ""
-    label: str = ""
-    composer: str = ""
-    lyricist: str = ""
-    conductor: str = ""
-    performer: str = ""
-    musicbrainz_id: str = ""
-    
-    def to_dict(self) -> Dict[str, Any]:
-        """转换为字典"""
-        return {
-            "track_id": self.track_id,
-            "title": self.title,
-            "artist": self.artist,
-            "album": self.album,
-            "album_artist": self.album_artist,
-            "year": self.year,
-            "genre": self.genre,
-            "track_number": self.track_number,
-            "disc_number": self.disc_number,
-            "duration_sec": self.duration_sec,
-            "comment": self.comment,
-            "label": self.label,
-            "composer": self.composer,
-            "lyricist": self.lyricist,
-            "conductor": self.conductor,
-            "performer": self.performer,
-            "musicbrainz_id": self.musicbrainz_id,
-        }
-    
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "TrackInput":
-        """从字典创建"""
-        return cls(
-            track_id=data.get("track_id", ""),
-            title=data.get("title", ""),
-            artist=data.get("artist", ""),
-            album=data.get("album", ""),
-            album_artist=data.get("album_artist", ""),
-            year=data.get("year", ""),
-            genre=data.get("genre", ""),
-            track_number=data.get("track_number", 0),
-            disc_number=data.get("disc_number", 0),
-            duration_sec=data.get("duration_sec", 0),
-            comment=data.get("comment", ""),
-            label=data.get("label", ""),
-            composer=data.get("composer", ""),
-            lyricist=data.get("lyricist", ""),
-            conductor=data.get("conductor", ""),
-            performer=data.get("performer", ""),
-            musicbrainz_id=data.get("musicbrainz_id", ""),
-        )
-    
-    def to_query_input(self) -> QueryInput:
-        """转换为 QueryInput"""
-        return QueryInput(
-            track_id=self.track_id,
-            title=self.title,
-            artist=self.artist,
-            album=self.album,
-            duration=self.duration_sec,
-            raw_data=self.to_dict()
-        )
 
 
 @dataclass
@@ -275,11 +205,17 @@ class Stage1Processor:
         Returns:
             List[ScrapingResult]: 刮削结果列表
         """
-        logger.debug(f"Stage1Processor::scrape: processing {len(tracks)} tracks")
-        
+        logger.info(
+            f"Stage1Processor::scrape: BEGIN, tracks={len(tracks)}, "
+            f"data_sources={options.data_sources if hasattr(options, 'data_sources') else 'all'}"
+        )
+
         missing = self.validate_tracks(tracks)
         if missing:
-            logger.warning(f"Found {len(missing)} tracks with missing required fields")
+            logger.warning(
+                f"Stage1Processor::scrape: {len(missing)}/{len(tracks)} tracks have missing required fields, "
+                f"first_missing={missing[0].missing_fields if missing else []}"
+            )
             return [
                 ScrapingResult(
                     track_id=m.track_id,
@@ -288,51 +224,66 @@ class Stage1Processor:
                 )
                 for m in missing
             ]
-        
+
         results = [None] * len(tracks)
-        
+
         pending_normal = []
         pending_normal_indices = []
         pending_enhanced = []
         pending_enhanced_indices = []
-        
+
         for i, track in enumerate(tracks):
             if is_aborted():
-                logger.debug(f"Abort requested, stopping at track {i}/{len(tracks)}")
+                logger.warning(f"Stage1Processor::scrape: ABORTED at track {i+1}/{len(tracks)}")
                 break
-            
+
             result = self._scrape_single_prepare(track, options)
-            
+
             if result is not None:
                 results[i] = result
             else:
                 query = track.to_query_input()
-                logger.debug(f"[Data] Before fetch_all: track_id={track.track_id}, title='{query.title}'")
+                logger.info(
+                    f"Stage1Processor::scrape: track {i+1}/{len(tracks)} "
+                    f"track_id={track.track_id[:16]}, query title='{query.title[:40]}', "
+                    f"artist='{query.artist[:40]}', album='{query.album[:40]}'"
+                )
                 raw_candidates = self._data_source_manager.fetch_all(query, options)
-                logger.debug(f"[Data] After fetch_all: track_id={track.track_id}, raw_candidates={len(raw_candidates)}")
+                logger.info(
+                    f"Stage1Processor::scrape: track {i+1} fetch_all done, "
+                    f"raw_candidates={len(raw_candidates)}"
+                )
                 aggregation_result = self._aggregator.aggregate(raw_candidates)
                 candidates = aggregation_result.candidates
-                logger.debug(f"[Data] After aggregate: track_id={track.track_id}, candidates={len(candidates)}")
-                
+                logger.info(
+                    f"Stage1Processor::scrape: track {i+1} aggregate done, "
+                    f"candidates={len(candidates)}"
+                )
+
                 if len(candidates) >= 3:
                     pending_normal.append((track, query, candidates))
                     pending_normal_indices.append(i)
                 else:
                     pending_enhanced.append((track, query, candidates))
                     pending_enhanced_indices.append(i)
-        
+
         if pending_normal:
-            logger.debug(f"Batch normal resolve: {len(pending_normal)} tracks")
+            logger.info(
+                f"Stage1Processor::scrape: batch NORMAL resolve, "
+                f"tracks={len(pending_normal)}, indices={pending_normal_indices}"
+            )
             queries = [item[1] for item in pending_normal]
             candidates_list = [item[2] for item in pending_normal]
-            
-            logger.debug(f"[Data] Before resolve_batch (normal): {len(queries)} queries")
+
             final_results = self._resolver.resolve_batch(queries, candidates_list, enhanced=False)
-            logger.debug(f"[Data] After resolve_batch (normal): {len(final_results)} results")
-            
+            logger.info(
+                f"Stage1Processor::scrape: normal resolve_batch returned "
+                f"{len(final_results)} results"
+            )
+
             for idx, (final_result, (track, query, candidates)) in enumerate(zip(final_results, pending_normal)):
                 i = pending_normal_indices[idx]
-                
+
                 results[i] = ScrapingResult(
                     track_id=track.track_id,
                     success=True,
@@ -342,15 +293,20 @@ class Stage1Processor:
                     fallback_used=False,
                     cache_hit=False
                 )
-        
+
         if pending_enhanced:
-            logger.debug(f"Batch enhanced resolve: {len(pending_enhanced)} tracks")
+            logger.info(
+                f"Stage1Processor::scrape: batch ENHANCED resolve, "
+                f"tracks={len(pending_enhanced)}, indices={pending_enhanced_indices}"
+            )
             queries = [item[1] for item in pending_enhanced]
             candidates_list = [item[2] for item in pending_enhanced]
-            
-            logger.debug(f"[Data] Before resolve_batch (enhanced): {len(queries)} queries")
+
             final_results = self._resolver.resolve_batch(queries, candidates_list, enhanced=True)
-            logger.debug(f"[Data] After resolve_batch (enhanced): {len(final_results)} results")
+            logger.info(
+                f"Stage1Processor::scrape: enhanced resolve_batch returned "
+                f"{len(final_results)} results"
+            )
             
             for idx, (final_result, (track, query, candidates)) in enumerate(zip(final_results, pending_enhanced)):
                 i = pending_enhanced_indices[idx]

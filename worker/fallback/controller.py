@@ -8,23 +8,20 @@ Controls the fallback pipeline when primary data sources fail
 import logging
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass
-from enum import Enum
 
-from data_sources.base import Candidate, QueryInput, DataSourceType
+from data_sources.base import (
+    Candidate,
+    QueryInput,
+    DataSourceType,
+    FinalResult,
+    FallbackLevel,
+)
 from data_sources.manager import DataSourceManager
 from core.aggregator import CandidateAggregator
-from core.resolver import AIResolver, FinalResult
+from core.resolver import AIResolver
 from .query_rewriter import QueryRewriter
 
 logger = logging.getLogger(__name__)
-
-
-class FallbackLevel(str, Enum):
-    """降级级别"""
-    NORMAL = "normal"
-    ENHANCED = "enhanced"
-    REWRITE = "rewrite"
-    AI_INFER = "ai_infer"
 
 
 @dataclass
@@ -240,7 +237,7 @@ class FallbackController:
                 artist=query.artist,
                 album=query.album,
                 confidence=0.0,
-                source=DataSourceType.AI,
+                source=DataSourceType.AI.value,
                 sources=[],
                 is_fallback=True
             )
@@ -263,18 +260,18 @@ class FallbackController:
                 artist=query.artist,
                 album=query.album,
                 confidence=0.0,
-                source=DataSourceType.AI,
+                source=DataSourceType.AI.value,
                 sources=[],
                 is_fallback=True
             )
-        
+
         sorted_candidates = sorted(candidates, key=lambda c: c.confidence, reverse=True)
         best = sorted_candidates[0]
-        
+
         sources = [best.source]
         if best.sources:
             sources = best.sources
-        
+
         return FinalResult(
             title=best.title or query.title,
             artist=best.artist or query.artist,
@@ -290,8 +287,8 @@ class FallbackController:
             catalog_number=best.catalog_number,
             musicbrainz_id=best.musicbrainz_id,
             confidence=best.confidence,
-            source=best.source,
-            sources=sources,
+            source=best.source.value if isinstance(best.source, DataSourceType) else str(best.source),
+            sources=[s.value if isinstance(s, DataSourceType) else str(s) for s in sources],
             is_fallback=True
         )
     
