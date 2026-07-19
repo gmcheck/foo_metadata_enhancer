@@ -49,6 +49,41 @@ except Exception as e:
     traceback.print_exc(file=sys.stderr)
     sys.exit(1)
 
+# 全局 NormalizeStore 单例（延迟初始化）
+# 管理 normalize_alias 表的 SQLite 访问（含 alias_key 归一化查询）
+_normalize_store = None
+
+def get_normalize_store():
+    """延迟初始化并返回 NormalizeStore 单例
+
+    db_path 取自 foobar2000 profile 目录下的 foo_metadata_enhancer.db
+    （与 C++ 端 CacheLayer 共享同一个 db 文件）
+    """
+    global _normalize_store
+    if _normalize_store is not None:
+        return _normalize_store
+
+    try:
+        from common.config_manager import _find_foobar_profile, _get_expected_settings_path
+        from db.normalize_store import NormalizeStore
+
+        profile_dir = _find_foobar_profile()
+        if profile_dir is None:
+            expected = _get_expected_settings_path()
+            if expected is not None:
+                db_path = expected.parent / "foo_metadata_enhancer.db"
+            else:
+                db_path = SCRIPT_DIR / "foo_metadata_enhancer.db"
+        else:
+            db_path = profile_dir / "foo_metadata_enhancer.db"
+
+        _normalize_store = NormalizeStore(str(db_path))
+        logger.info(f"get_normalize_store: opened db at {db_path}")
+        return _normalize_store
+    except Exception as e:
+        logger.error(f"get_normalize_store: failed to init NormalizeStore: {e}", exc_info=True)
+        return None
+
 try:
     from common.models import (
         IPCResponse,
@@ -616,7 +651,10 @@ def process_normalize(request: Dict) -> Dict:
         return create_error_response(request_id, "INVALID_JSON", "No candidates and known_groups provided", task_id=task_id)
 
     try:
-        processor = NormalizeProcessor(config.config)
+        processor = NormalizeProcessor(
+            config.config,
+            normalize_store=get_normalize_store()
+        )
         result = processor.process(request)
 
         # NormalizeProcessor 返回的 dict 已包含 id/task_id/success/result
@@ -640,6 +678,105 @@ def process_normalize(request: Dict) -> Dict:
     except Exception as e:
         logger.error(f"Error in normalize: {e}", exc_info=True)
         return create_error_response(request_id, "NORMALIZE_ERROR", str(e), task_id=task_id)
+
+
+def process_save_normalize_aliases(request: Dict) -> Dict:
+    """处理 save_normalize_aliases 请求 - 用户确认后持久化 alias 映射
+
+    由 C++ 端在用户于 Normalize UI 确认后调用，把选中的 groups 持久化到
+    normalize_alias 表（Python 端管理）。后续 normalize 调用会通过
+    NormalizeStore.get_aliases 命中这些条目，跳过 AI 调用。
+
+    请求结构：
+        {
+            "method": "save_normalize_aliases",
+            "params": {
+                "field": "artist",
+                "aliases": [
+                    {
+                        "alias_name": "华仔",           # 原始写法
+                        "canonical_name": "刘德华",
+                        "source": "ai",                 # 可选，默认 "ai"
+                        "confidence": 0.95,             # 可选，默认 1.0
+                        "confirmed": true,              # 可选，默认 true
+                        "reason": "..."                 # 可选，默认 ""
+                    },
+                    ...
+                ]
+            }
+        }
+
+    响应结构：
+        {
+            "success": True,
+            "results": [{"saved": N}]     # N = 写入条目数
+        }
+    """
+    request_id = request.get("id", str(uuid.uuid4()))
+    task_id = request.get("task_id", request_id)
+    params = request.get("params", {})
+    field = params.get("field", "artist")
+    aliases = params.get("aliases", [])
+
+    logger.info(
+        f"process_save_normalize_aliases: Request ID = {request_id}, "
+        f"field = {field}, aliases = {len(aliases)}"
+    )
+
+    if not aliases:
+        return create_response(
+            request_id,
+            success=True,
+            results=[{"saved": 0}],
+            task_id=task_id,
+        )
+
+    try:
+        store = get_normalize_store()
+        if store is None:
+            return create_error_response(
+                request_id,
+                "STORE_UNAVAILABLE",
+                "NormalizeStore not initialized",
+                task_id=task_id,
+            )
+
+        # 给每条加上 field（C++ 端可能省略）
+        entries = []
+        for a in aliases:
+            entries.append({
+                "field": field,
+                "alias_name": a.get("alias_name", ""),
+                "canonical_name": a.get("canonical_name", ""),
+                "source": a.get("source", "ai"),
+                "confidence": a.get("confidence", 1.0),
+                "confirmed": a.get("confirmed", True),
+                "reason": a.get("reason", ""),
+            })
+
+        ok = store.upsert_aliases(entries)
+        if not ok:
+            return create_error_response(
+                request_id,
+                "STORE_WRITE_ERROR",
+                "Failed to upsert aliases",
+                task_id=task_id,
+            )
+
+        return create_response(
+            request_id,
+            success=True,
+            results=[{"saved": len(entries)}],
+            task_id=task_id,
+        )
+    except Exception as e:
+        logger.error(f"Error in save_normalize_aliases: {e}", exc_info=True)
+        return create_error_response(
+            request_id,
+            "SAVE_ALIASES_ERROR",
+            str(e),
+            task_id=task_id,
+        )
 
 
 def handle_request(request: Dict) -> Optional[Dict]:
@@ -673,6 +810,8 @@ def handle_request(request: Dict) -> Optional[Dict]:
         return process_stage2_enhance(request)
     elif method == "normalize":
         return process_normalize(request)
+    elif method == "save_normalize_aliases":
+        return process_save_normalize_aliases(request)
     elif method == "set_log_level":
         return process_set_log_level(request)
     else:

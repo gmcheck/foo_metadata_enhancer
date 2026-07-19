@@ -37,15 +37,17 @@ class NormalizeProcessor:
     # 零宽字符集合（不可见，应从 key 中完全移除）
     _ZERO_WIDTH_CHARS = frozenset({'\u200b', '\u200c', '\u200d', '\ufeff', '\u2060'})
 
-    def __init__(self, config: Dict[str, Any], ai_adapter=None):
+    def __init__(self, config: Dict[str, Any], ai_adapter=None, normalize_store=None):
         """初始化
 
         Args:
             config: 配置字典
             ai_adapter: ModelAdapter 实例（可选，延迟创建）
+            normalize_store: NormalizeStore 实例（可选，用于查 SQLite 知识库）
         """
         self.config = config
         self._ai_adapter = ai_adapter
+        self._store = normalize_store
 
     def _get_adapter(self):
         """延迟创建 ModelAdapter"""
@@ -109,9 +111,8 @@ class NormalizeProcessor:
         params = request.get("params", {})
         field = params.get("field", "artist")
         candidates = params.get("candidates", [])
-        # C++ 端查询 SQLite 命中的 groups（canonical_name + aliases），
-        # 交给 Python 与 _clean_candidates 生成的变体 pre_groups 合并。
-        # 这样能正确处理 SQLite 存的是 trim 过的 alias，而 track 实际值带尾空格的情况。
+        # known_groups 现在由 Python 端查询 SQLite 后构造，不再从 C++ 接收
+        # （保留参数解析仅为向后兼容；C++ 端 normalize_sync 已移除预查逻辑）
         known_groups = params.get("known_groups", [])
         # C++ 端送来的每个 track 当前 field 的所有 values（multi-value 支持）。
         # Python 在生成最终 groups 后，根据 groups 为每个 track 构造目标 values，
@@ -135,12 +136,34 @@ class NormalizeProcessor:
                 "result": {"groups": [], "uncertain": [], "track_updates": track_updates},
             }
 
-        # 边缘情况：candidates 为空但 known_groups 不为空（所有 alias 都被 SQLite 命中）
-        # 直接返回 known_groups，无需调用 AI
-        if not candidates and known_groups:
+        # ----------------------------------------------------------------
+        # 查询 SQLite 知识库（NormalizeStore），把命中的 alias 转为 known_groups
+        # ----------------------------------------------------------------
+        # 查询使用 alias_key 归一化匹配（NFC + strip + lower），
+        # "Beyond" / "beyond " / "BEYOND" 都能命中同一条记录。
+        if self._store and candidates:
+            known_groups, unknown_candidates = self._query_store_and_split(
+                field, candidates, known_groups
+            )
             logger.info(
-                f"NormalizeProcessor::process: no candidates, returning "
-                f"{len(known_groups)} known_groups directly"
+                f"NormalizeProcessor::process: SQLite hit "
+                f"{len(candidates) - len(unknown_candidates)}/{len(candidates)} aliases, "
+                f"known_groups={len(known_groups)}, unknown={len(unknown_candidates)}"
+            )
+        else:
+            # 无 store（异常情况）或无 candidates：所有 candidates 送 AI
+            unknown_candidates = candidates
+            if candidates:
+                logger.warning(
+                    f"NormalizeProcessor::process: store unavailable, "
+                    f"sending all {len(candidates)} candidates to AI"
+                )
+
+        # 边缘情况：所有 candidates 都被 SQLite 命中 → 直接返回 known_groups，不调 AI
+        if not unknown_candidates and known_groups:
+            logger.info(
+                f"NormalizeProcessor::process: all candidates hit SQLite, "
+                f"returning {len(known_groups)} known_groups directly"
             )
             track_updates = self._build_track_updates(known_groups, track_values)
             return {
@@ -152,7 +175,8 @@ class NormalizeProcessor:
 
         try:
             # 1. 清理输入 + 预归一化（合并仅空白/大小写差异的 alias）
-            cleaned, pre_groups = self._clean_candidates(candidates)
+            #    只对未命中 SQLite 的 candidates 调 AI
+            cleaned, pre_groups = self._clean_candidates(unknown_candidates)
 
             # 2. 构造 prompt
             # 3. 调用 AI
@@ -300,6 +324,105 @@ class NormalizeProcessor:
                 "success": False,
                 "error": {"code": "INTERNAL_ERROR", "message": str(e)},
             }
+
+    def _query_store_and_split(
+        self,
+        field: str,
+        candidates: List[Dict],
+        known_groups: List[Dict],
+    ) -> tuple:
+        """查询 SQLite 知识库，把命中的 candidate 转为 known_groups
+
+        Args:
+            field: 目标字段
+            candidates: C++ 送来的全部候选 alias 列表
+                        [{"alias": "Beyond", "examples": [...]}, ...]
+            known_groups: 已有的 known_groups（通常为空，保留参数为向后兼容）
+
+        Returns:
+            (known_groups, unknown_candidates) 二元组：
+            - known_groups：命中 SQLite 的 alias 构造的 groups
+                            [{"canonical_name": ..., "aliases": [...], ...}, ...]
+            - unknown_candidates：未命中的 candidate，需要送 AI
+        """
+        # 收集所有 candidate 的原始 alias 字符串
+        alias_names = [c.get("alias", "") for c in candidates if c.get("alias")]
+        if not alias_names:
+            return known_groups, []
+
+        # 批量查询 SQLite（用 alias_key 归一化匹配）
+        try:
+            hits = self._store.get_aliases(field, alias_names)
+        except Exception as e:
+            logger.error(f"_query_store_and_split: store query failed: {e}", exc_info=True)
+            return known_groups, candidates
+
+        if not hits:
+            # 全部未命中
+            return known_groups, candidates
+
+        # 建立 alias_key → hit 条目索引
+        # 注意：hits 里的 alias_name 是库里存储的原始写法，
+        # 而 candidates 里的 alias 是 track 实际值（可能有变体）。
+        # 用 alias_key 匹配，把 candidate 的原始 alias 字符串加入 group.aliases
+        # （这样 _build_track_updates 用 _normalize_key 匹配时能正确识别变体）。
+        hit_by_key: Dict[str, Dict] = {}
+        for h in hits:
+            key = self._normalize_key(h.get("alias_name", ""))
+            if key and key not in hit_by_key:
+                hit_by_key[key] = h
+
+        # 按 canonical_name 聚合命中条目为 groups
+        # key = canonical_name（normalize 后），value = group dict
+        groups_by_canonical: Dict[str, Dict] = {}
+        handled_keys = set()  # 已命中的 candidate 的 alias_key 集合
+
+        for c in candidates:
+            alias_value = c.get("alias", "")
+            if not alias_value:
+                continue
+            key = self._normalize_key(alias_value)
+            if not key:
+                continue
+
+            hit = hit_by_key.get(key)
+            if not hit:
+                continue
+
+            handled_keys.add(key)
+            canonical = hit.get("canonical_name", "")
+            canonical_key = self._normalize_key(canonical)
+
+            g = groups_by_canonical.get(canonical_key)
+            if g is None:
+                g = {
+                    "canonical_name": canonical,
+                    "confidence": float(hit.get("confidence", 1.0)),
+                    "reason": hit.get("reason") or "SQLite knowledge base hit",
+                    "aliases": [],
+                }
+                groups_by_canonical[canonical_key] = g
+
+            # 把 candidate 的原始 alias 字符串加入 group（去重）
+            if alias_value not in g["aliases"]:
+                g["aliases"].append(alias_value)
+
+        # 合并 known_groups（外部传入的，通常为空）
+        result_groups = list(groups_by_canonical.values())
+        if known_groups:
+            result_groups = list(known_groups) + result_groups
+
+        # 收集未命中的 candidates
+        unknown_candidates = []
+        for c in candidates:
+            alias_value = c.get("alias", "")
+            if not alias_value:
+                continue
+            key = self._normalize_key(alias_value)
+            if key not in handled_keys:
+                unknown_candidates.append(c)
+
+        return result_groups, unknown_candidates
 
     def _build_track_updates(
         self,

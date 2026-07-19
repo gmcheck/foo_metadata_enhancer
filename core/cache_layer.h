@@ -40,22 +40,12 @@ struct Stage2CacheEntry {
 };
 
 /**
- * @brief Normalize 知识库条目：alias → canonical 映射
- */
-struct AliasEntry {
-    std::string field;           // "artist" | "album_artist" | "album" | "genre" | ...
-    std::string alias_name;      // 原始写法
-    std::string canonical_name;  // 标准写法
-    std::string source;          // "ai" | "manual" | "imported"
-    float confidence = 1.0f;     // AI 置信度
-    bool confirmed = true;       // 是否用户确认
-    std::string reason;          // AI 给出的归并理由
-};
-
-/**
  * @brief 缓存层类，负责管理元数据缓存数据库
- * 
+ *
  * 使用SQLite数据库存储和检索音轨分析结果，支持批量操作和缓存统计
+ *
+ * 注意：normalize_alias 表已迁移到 Python 端管理（NormalizeProcessor 内），
+ *       本类不再提供 alias 相关接口。
  */
 class CacheLayer {
 public:
@@ -157,37 +147,12 @@ public:
      */
     bool is_valid() const { return db_ != nullptr; }
 
-    // ==================== Normalize Alias 知识库 ====================
-
-    /**
-     * @brief 批量查询 alias → canonical 映射
-     * @param field 目标字段（artist/album_artist/album/...）
-     * @param alias_names 待查的 alias 列表
-     * @return 命中的 AliasEntry 列表
-     */
-    std::vector<AliasEntry> get_aliases(
-        const std::string& field,
-        const std::vector<std::string>& alias_names
-    );
-
-    /**
-     * @brief 写入或更新单条 alias 映射
-     * @return 成功返回 true
-     */
-    bool upsert_alias(const AliasEntry& entry);
-
-    /**
-     * @brief 批量写入 alias 映射（事务）
-     * @return 全部成功返回 true
-     */
-    bool batch_upsert_aliases(const std::vector<AliasEntry>& entries);
-    
 private:
     /**
      * @brief 初始化数据库连接
      */
     void init_database();
-    
+
     /**
      * @brief 创建数据库表
      */
@@ -197,7 +162,15 @@ private:
      * @brief 创建数据库索引
      */
     void create_indexes();
-    
+
+    /**
+     * @brief 迁移旧表名到新表名（幂等，仅执行一次）
+     *   stage1_cache → scrape_cache
+     *   stage2_cache → enhance_cache
+     *   normalize_alias（旧空表）→ DROP
+     */
+    void migrate_legacy_tables();
+
     /**
      * @brief 检查数据库完整性
      * @return 如果完整性检查通过返回true

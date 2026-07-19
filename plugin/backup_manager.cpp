@@ -42,16 +42,20 @@ void BackupManager::init_database() {
     }
 
     // 新库直接建带 operation_type 的表；旧库由 migrate_schema 处理
+    // rollback_snapshot：每次 Scrape/Translate/Normalize 操作前的 tag 字段快照
+    //   - 每个 (track_id, operation_type) 仅保留最近一次快照（写入时覆盖）
+    //   - 用于 Rollback 菜单恢复指定操作前的字段状态
+    //   - 由 BackupManager 管理（C++ 端，UI 同步流程）
     const char* create_table_sql = R"(
-        CREATE TABLE IF NOT EXISTS metadata_snapshots (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            track_id TEXT NOT NULL,
-            operation_type TEXT NOT NULL DEFAULT 'scrape',
-            snapshot_data TEXT NOT NULL,
-            field_count INTEGER DEFAULT 0,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
-            UNIQUE(track_id, operation_type)
+        CREATE TABLE IF NOT EXISTS rollback_snapshot (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT, -- 自增主键
+            track_id        TEXT NOT NULL,                     -- 同 scrape_cache.track_id
+            operation_type  TEXT NOT NULL DEFAULT 'scrape',    -- 操作类型：scrape / translate / normalize
+            snapshot_data   TEXT NOT NULL,                     -- 操作前 tag 字段 JSON 快照
+            field_count     INTEGER DEFAULT 0,                 -- 字段数量
+            created_at      TEXT NOT NULL,                     -- 创建时间
+            updated_at      TEXT NOT NULL,                     -- 更新时间
+            UNIQUE(track_id, operation_type)                  -- 每 track × 每操作仅一条
         )
     )";
 
@@ -65,12 +69,12 @@ void BackupManager::init_database() {
         return;
     }
 
-    // 旧库迁移：加 operation_type 列、调整唯一约束
+    // 旧库迁移：旧表名 metadata_snapshots → rollback_snapshot，并补 operation_type 列
     migrate_schema();
 
-    const char* create_index_sql = "CREATE INDEX IF NOT EXISTS idx_snapshot_track_id ON metadata_snapshots(track_id)";
+    const char* create_index_sql = "CREATE INDEX IF NOT EXISTS idx_rollback_snapshot_track_id ON rollback_snapshot(track_id)";
     sqlite3_exec(static_cast<sqlite3*>(db_), create_index_sql, nullptr, nullptr, nullptr);
-    const char* create_op_index_sql = "CREATE INDEX IF NOT EXISTS idx_snapshot_op_type ON metadata_snapshots(operation_type)";
+    const char* create_op_index_sql = "CREATE INDEX IF NOT EXISTS idx_rollback_snapshot_op_type ON rollback_snapshot(operation_type)";
     sqlite3_exec(static_cast<sqlite3*>(db_), create_op_index_sql, nullptr, nullptr, nullptr);
 
     healthy_ = true;
@@ -78,11 +82,41 @@ void BackupManager::init_database() {
 }
 
 void BackupManager::migrate_schema() {
-    // 检查 operation_type 列是否存在
+    sqlite3* db = static_cast<sqlite3*>(db_);
+
+    // -------------------------------------------------------------------
+    // Step 1: 旧表名 metadata_snapshots → rollback_snapshot（幂等）
+    // -------------------------------------------------------------------
+    auto table_exists = [db](const std::string& name) -> bool {
+        sqlite3_stmt* s = nullptr;
+        bool exists = false;
+        if (sqlite3_prepare_v2(db, "SELECT name FROM sqlite_master WHERE type='table' AND name=?", -1, &s, nullptr) == SQLITE_OK) {
+            sqlite3_bind_text(s, 1, name.c_str(), -1, SQLITE_TRANSIENT);
+            if (sqlite3_step(s) == SQLITE_ROW) exists = true;
+            sqlite3_finalize(s);
+        }
+        return exists;
+    };
+
+    if (table_exists("metadata_snapshots") && !table_exists("rollback_snapshot")) {
+        Logger::instance().info("[BackupManager] migrate_schema: Renaming metadata_snapshots → rollback_snapshot");
+        sqlite3_exec(db, "DROP INDEX IF EXISTS idx_snapshot_track_id", nullptr, nullptr, nullptr);
+        sqlite3_exec(db, "DROP INDEX IF EXISTS idx_snapshot_op_type", nullptr, nullptr, nullptr);
+        sqlite3_exec(db, "ALTER TABLE metadata_snapshots RENAME TO rollback_snapshot", nullptr, nullptr, nullptr);
+    }
+
+    if (!table_exists("rollback_snapshot")) {
+        // 极端情况：旧表也不存在（不应发生，init_database 已建表）
+        return;
+    }
+
+    // -------------------------------------------------------------------
+    // Step 2: 检查 operation_type 列是否存在
+    // -------------------------------------------------------------------
     sqlite3_stmt* stmt = nullptr;
     int rc = sqlite3_prepare_v2(
-        static_cast<sqlite3*>(db_),
-        "PRAGMA table_info(metadata_snapshots)",
+        db,
+        "PRAGMA table_info(rollback_snapshot)",
         -1, &stmt, nullptr
     );
     if (rc != SQLITE_OK) {
@@ -90,7 +124,6 @@ void BackupManager::migrate_schema() {
     }
 
     bool has_op_type = false;
-    bool has_old_unique = false;  // 旧表 track_id UNIQUE
     while (sqlite3_step(stmt) == SQLITE_ROW) {
         const char* col_name = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
         if (col_name && std::string(col_name) == "operation_type") {
@@ -102,43 +135,43 @@ void BackupManager::migrate_schema() {
     // 旧库无 operation_type 列：添加列并把现有数据标为 scrape
     if (!has_op_type) {
         Logger::instance().info("[BackupManager] migrate_schema: adding operation_type column");
-        sqlite3_exec(static_cast<sqlite3*>(db_),
-            "ALTER TABLE metadata_snapshots ADD COLUMN operation_type TEXT NOT NULL DEFAULT 'scrape'",
+        sqlite3_exec(db,
+            "ALTER TABLE rollback_snapshot ADD COLUMN operation_type TEXT NOT NULL DEFAULT 'scrape'",
             nullptr, nullptr, nullptr);
 
         // 旧表有 track_id UNIQUE 约束，新表要改为 UNIQUE(track_id, operation_type)
         // SQLite 无法直接修改约束，需重建表
         // 1. 重命名旧表
-        sqlite3_exec(static_cast<sqlite3*>(db_),
-            "ALTER TABLE metadata_snapshots RENAME TO metadata_snapshots_old",
+        sqlite3_exec(db,
+            "ALTER TABLE rollback_snapshot RENAME TO rollback_snapshot_old",
             nullptr, nullptr, nullptr);
 
         // 2. 创建新表（带复合唯一约束）
         const char* new_table_sql = R"(
-            CREATE TABLE metadata_snapshots (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                track_id TEXT NOT NULL,
-                operation_type TEXT NOT NULL DEFAULT 'scrape',
-                snapshot_data TEXT NOT NULL,
-                field_count INTEGER DEFAULT 0,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
+            CREATE TABLE rollback_snapshot (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                track_id        TEXT NOT NULL,
+                operation_type  TEXT NOT NULL DEFAULT 'scrape',
+                snapshot_data   TEXT NOT NULL,
+                field_count     INTEGER DEFAULT 0,
+                created_at      TEXT NOT NULL,
+                updated_at      TEXT NOT NULL,
                 UNIQUE(track_id, operation_type)
             )
         )";
-        sqlite3_exec(static_cast<sqlite3*>(db_), new_table_sql, nullptr, nullptr, nullptr);
+        sqlite3_exec(db, new_table_sql, nullptr, nullptr, nullptr);
 
         // 3. 拷贝数据
-        sqlite3_exec(static_cast<sqlite3*>(db_),
-            "INSERT INTO metadata_snapshots (id, track_id, operation_type, snapshot_data, "
+        sqlite3_exec(db,
+            "INSERT INTO rollback_snapshot (id, track_id, operation_type, snapshot_data, "
             "field_count, created_at, updated_at) "
             "SELECT id, track_id, operation_type, snapshot_data, field_count, created_at, updated_at "
-            "FROM metadata_snapshots_old",
+            "FROM rollback_snapshot_old",
             nullptr, nullptr, nullptr);
 
         // 4. 删除旧表
-        sqlite3_exec(static_cast<sqlite3*>(db_),
-            "DROP TABLE metadata_snapshots_old",
+        sqlite3_exec(db,
+            "DROP TABLE rollback_snapshot_old",
             nullptr, nullptr, nullptr);
 
         Logger::instance().info("[BackupManager] migrate_schema: schema migrated to multi-operation");
@@ -197,7 +230,7 @@ bool BackupManager::save_snapshot(
     int field_count = static_cast<int>(snapshot.size());
 
     const char* insert_sql = R"(
-        INSERT INTO metadata_snapshots (
+        INSERT INTO rollback_snapshot (
             track_id, operation_type, snapshot_data, field_count, created_at, updated_at
         ) VALUES (?, ?, ?, ?, ?, ?)
     )";
@@ -276,7 +309,7 @@ std::vector<std::string> BackupManager::get_all_tracks_with_snapshot() {
         return track_ids;
     }
 
-    const char* select_sql = "SELECT DISTINCT track_id FROM metadata_snapshots";
+    const char* select_sql = "SELECT DISTINCT track_id FROM rollback_snapshot";
 
     sqlite3_stmt* stmt = nullptr;
     int rc = sqlite3_prepare_v2(
@@ -309,7 +342,7 @@ int BackupManager::get_snapshot_count() {
         return 0;
     }
 
-    const char* select_sql = "SELECT COUNT(*) FROM metadata_snapshots";
+    const char* select_sql = "SELECT COUNT(*) FROM rollback_snapshot";
 
     sqlite3_stmt* stmt = nullptr;
     int rc = sqlite3_prepare_v2(
@@ -345,7 +378,7 @@ bool BackupManager::has_operation_snapshot(const std::string& track_id, Operatio
 
     if (!healthy_) return false;
 
-    const char* sql = "SELECT 1 FROM metadata_snapshots WHERE track_id = ? AND operation_type = ? LIMIT 1";
+    const char* sql = "SELECT 1 FROM rollback_snapshot WHERE track_id = ? AND operation_type = ? LIMIT 1";
     sqlite3_stmt* stmt = nullptr;
     int rc = sqlite3_prepare_v2(static_cast<sqlite3*>(db_), sql, -1, &stmt, nullptr);
     if (rc != SQLITE_OK) return false;
@@ -377,7 +410,7 @@ bool BackupManager::ensure_operation_snapshot(
     // 再次检查（race condition 防护）
     // 注意：不能调用 has_operation_snapshot，它会再次加锁同一 mutex 导致死锁
     {
-        const char* check_sql = "SELECT 1 FROM metadata_snapshots WHERE track_id = ? AND operation_type = ? LIMIT 1";
+        const char* check_sql = "SELECT 1 FROM rollback_snapshot WHERE track_id = ? AND operation_type = ? LIMIT 1";
         sqlite3_stmt* check_stmt = nullptr;
         int rc = sqlite3_prepare_v2(static_cast<sqlite3*>(db_), check_sql, -1, &check_stmt, nullptr);
         if (rc == SQLITE_OK) {
@@ -396,7 +429,7 @@ bool BackupManager::ensure_operation_snapshot(
     int field_count = static_cast<int>(snapshot.size());
 
     const char* insert_sql = R"(
-        INSERT INTO metadata_snapshots (
+        INSERT INTO rollback_snapshot (
             track_id, operation_type, snapshot_data, field_count, created_at, updated_at
         ) VALUES (?, ?, ?, ?, ?, ?)
     )";
@@ -444,7 +477,7 @@ std::map<std::string, std::string> BackupManager::get_operation_snapshot(
 
     if (!healthy_) return result;
 
-    const char* sql = "SELECT snapshot_data FROM metadata_snapshots WHERE track_id = ? AND operation_type = ?";
+    const char* sql = "SELECT snapshot_data FROM rollback_snapshot WHERE track_id = ? AND operation_type = ?";
     sqlite3_stmt* stmt = nullptr;
     int rc = sqlite3_prepare_v2(static_cast<sqlite3*>(db_), sql, -1, &stmt, nullptr);
     if (rc != SQLITE_OK) return result;
@@ -495,7 +528,7 @@ std::map<std::string, std::map<std::string, std::string>> BackupManager::batch_r
         placeholders << "?";
     }
 
-    std::string sql = "SELECT track_id, snapshot_data FROM metadata_snapshots "
+    std::string sql = "SELECT track_id, snapshot_data FROM rollback_snapshot "
         "WHERE operation_type = ? AND track_id IN (" + placeholders.str() + ")";
 
     sqlite3_stmt* stmt = nullptr;
@@ -526,7 +559,7 @@ bool BackupManager::delete_operation_snapshot(const std::string& track_id, Opera
     std::lock_guard<std::mutex> lock(mutex_);
     if (!healthy_) return false;
 
-    const char* sql = "DELETE FROM metadata_snapshots WHERE track_id = ? AND operation_type = ?";
+    const char* sql = "DELETE FROM rollback_snapshot WHERE track_id = ? AND operation_type = ?";
     sqlite3_stmt* stmt = nullptr;
     int rc = sqlite3_prepare_v2(static_cast<sqlite3*>(db_), sql, -1, &stmt, nullptr);
     if (rc != SQLITE_OK) return false;
@@ -546,7 +579,7 @@ std::vector<OperationType> BackupManager::get_operations_for_track(const std::st
     std::lock_guard<std::mutex> lock(mutex_);
     if (!healthy_) return ops;
 
-    const char* sql = "SELECT DISTINCT operation_type FROM metadata_snapshots WHERE track_id = ?";
+    const char* sql = "SELECT DISTINCT operation_type FROM rollback_snapshot WHERE track_id = ?";
     sqlite3_stmt* stmt = nullptr;
     int rc = sqlite3_prepare_v2(static_cast<sqlite3*>(db_), sql, -1, &stmt, nullptr);
     if (rc != SQLITE_OK) return ops;
@@ -584,7 +617,7 @@ std::map<std::string, std::vector<OperationType>> BackupManager::get_operations_
         placeholders << "?";
     }
 
-    std::string sql = "SELECT track_id, operation_type FROM metadata_snapshots WHERE track_id IN (" +
+    std::string sql = "SELECT track_id, operation_type FROM rollback_snapshot WHERE track_id IN (" +
         placeholders.str() + ")";
     Logger::instance().info("[BackupManager] get_operations_for_tracks: querying " +
         std::to_string(track_ids.size()) + " track_ids, first track_id=" +
@@ -622,7 +655,7 @@ int BackupManager::delete_all_operation_snapshots(OperationType op_type) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!healthy_) return 0;
 
-    const char* sql = "DELETE FROM metadata_snapshots WHERE operation_type = ?";
+    const char* sql = "DELETE FROM rollback_snapshot WHERE operation_type = ?";
     sqlite3_stmt* stmt = nullptr;
     int rc = sqlite3_prepare_v2(static_cast<sqlite3*>(db_), sql, -1, &stmt, nullptr);
     if (rc != SQLITE_OK) return 0;

@@ -158,10 +158,13 @@ void CacheLayer::init_database() {
     
     Logger::instance().debug("init_database: Creating tables", __FILE__, __FUNCTION__);
     create_tables();
-    
+
+    Logger::instance().debug("init_database: Migrating legacy tables", __FILE__, __FUNCTION__);
+    migrate_legacy_tables();
+
     Logger::instance().debug("init_database: Creating indexes", __FILE__, __FUNCTION__);
     create_indexes();
-    
+
     Logger::instance().debug("init_database: Checking integrity", __FILE__, __FUNCTION__);
     if (!check_integrity()) {
         LOG_ERROR("init_database: Integrity check failed");
@@ -202,69 +205,62 @@ void CacheLayer::create_tables() {
     
     sqlite3_exec(db_, create_config_table, nullptr, nullptr, nullptr);
     
-    const char* create_stage1_cache_table = R"(
-        CREATE TABLE IF NOT EXISTS stage1_cache (
-            cache_key TEXT PRIMARY KEY NOT NULL,
-            track_id TEXT,
-            file_path TEXT,
-            title TEXT NOT NULL,
-            artist TEXT NOT NULL,
-            album TEXT,
-            scraped_fields_json TEXT,
-            source TEXT DEFAULT 'ai',
-            success INTEGER DEFAULT 1,
-            error_code TEXT,
-            error_message TEXT,
-            cache_hit_count INTEGER DEFAULT 0,
-            last_accessed_at TEXT,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
+    // =====================================================================
+    // scrape_cache：Scrape 阶段结果缓存表
+    //   - cache_key = SHA256(track_id+subsong+file_size)，hash 精确匹配
+    //   - TTL 由 cache_config.expiration_days 控制
+    //   - clear_all / clear_by_track_ids 会清空本表
+    //   - 由 CacheLayer 管理（C++ 端，UI 流程同步访问）
+    // =====================================================================
+    const char* create_scrape_cache_table = R"(
+        CREATE TABLE IF NOT EXISTS scrape_cache (
+            cache_key          TEXT PRIMARY KEY NOT NULL, -- hash key: SHA256(track_id+subsong+file_size)
+            track_id           TEXT,                      -- track_id（路径+subsong+file_size 的 SHA256）
+            file_path          TEXT,                      -- 文件路径（便于人工排查）
+            title              TEXT NOT NULL,             -- 查询时原始标题
+            artist             TEXT NOT NULL,             -- 查询时原始 artist
+            album              TEXT,                      -- 查询时原始 album
+            scraped_fields_json TEXT,                     -- 刮削结果 JSON（title/artist/album/year/genre/...）
+            source             TEXT DEFAULT 'ai',         -- 来源：ai / musicbrainz / discogs
+            success            INTEGER DEFAULT 1,         -- 是否成功（0/1）
+            error_code         TEXT,                      -- 失败错误码
+            error_message      TEXT,                      -- 失败错误信息
+            cache_hit_count    INTEGER DEFAULT 0,         -- 命中次数（统计用）
+            last_accessed_at   TEXT,                      -- 最近一次命中时间（ISO8601）
+            created_at         TEXT NOT NULL,             -- 创建时间
+            updated_at         TEXT NOT NULL              -- 更新时间
         )
     )";
-    
-    sqlite3_exec(db_, create_stage1_cache_table, nullptr, nullptr, nullptr);
-    
-    const char* create_stage2_cache_table = R"(
-        CREATE TABLE IF NOT EXISTS stage2_cache (
-            cache_key TEXT PRIMARY KEY NOT NULL,
-            track_id TEXT,
-            file_path TEXT,
-            title TEXT NOT NULL,
-            artist TEXT NOT NULL,
-            album TEXT,
-            success INTEGER DEFAULT 1,
-            title_zh TEXT,
-            album_zh TEXT,
-            artist_zh TEXT,
-            translation_confidence REAL DEFAULT 0.0,
-            error_code TEXT,
-            error_message TEXT,
-            cache_hit_count INTEGER DEFAULT 0,
-            last_accessed_at TEXT,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-        )
-    )";
-    
-    sqlite3_exec(db_, create_stage2_cache_table, nullptr, nullptr, nullptr);
+    sqlite3_exec(db_, create_scrape_cache_table, nullptr, nullptr, nullptr);
 
-    // Normalize 知识库表：保存用户确认过的 alias → canonical 映射
-    const char* create_normalize_alias_table = R"(
-        CREATE TABLE IF NOT EXISTS normalize_alias (
-            id              INTEGER PRIMARY KEY AUTOINCREMENT,
-            field           TEXT NOT NULL,
-            alias_name      TEXT NOT NULL,
-            canonical_name  TEXT NOT NULL,
-            source          TEXT DEFAULT 'ai',
-            confidence      REAL DEFAULT 1.0,
-            confirmed       INTEGER DEFAULT 1,
-            reason          TEXT,
-            created_time    TEXT NOT NULL,
-            updated_time    TEXT NOT NULL,
-            UNIQUE(field, alias_name)
+    // =====================================================================
+    // enhance_cache：Enhancer 翻译结果缓存表
+    //   - cache_key = SHA256(track_id + options)，hash 精确匹配
+    //   - TTL 由 cache_config.expiration_days 控制
+    //   - 由 CacheLayer 管理（C++ 端）
+    // =====================================================================
+    const char* create_enhance_cache_table = R"(
+        CREATE TABLE IF NOT EXISTS enhance_cache (
+            cache_key               TEXT PRIMARY KEY NOT NULL, -- hash key: SHA256(track_id + EnhancementOptions)
+            track_id                TEXT,                      -- track_id
+            file_path               TEXT,                      -- 文件路径
+            title                   TEXT NOT NULL,             -- 查询时原始标题
+            artist                  TEXT NOT NULL,             -- 查询时原始 artist
+            album                   TEXT,                      -- 查询时原始 album
+            success                 INTEGER DEFAULT 1,         -- 是否成功（0/1）
+            title_zh                TEXT,                      -- 翻译后的标题
+            album_zh                TEXT,                      -- 翻译后的 album
+            artist_zh               TEXT,                      -- 翻译后的 artist
+            translation_confidence  REAL DEFAULT 0.0,          -- 翻译置信度
+            error_code              TEXT,                      -- 失败错误码
+            error_message           TEXT,                      -- 失败错误信息
+            cache_hit_count         INTEGER DEFAULT 0,         -- 命中次数
+            last_accessed_at        TEXT,                      -- 最近命中时间
+            created_at              TEXT NOT NULL,             -- 创建时间
+            updated_at              TEXT NOT NULL              -- 更新时间
         )
     )";
-    sqlite3_exec(db_, create_normalize_alias_table, nullptr, nullptr, nullptr);
+    sqlite3_exec(db_, create_enhance_cache_table, nullptr, nullptr, nullptr);
 
     std::string init_config_sql =
         "INSERT OR IGNORE INTO cache_config (key, value, created_at, updated_at) VALUES "
@@ -279,14 +275,82 @@ void CacheLayer::create_tables() {
 void CacheLayer::create_indexes() {
     const char* indexes[] = {
         "CREATE INDEX IF NOT EXISTS idx_stat_date ON cache_statistics(stat_date)",
-        "CREATE INDEX IF NOT EXISTS idx_stage1_cache_key ON stage1_cache(cache_key)",
-        "CREATE INDEX IF NOT EXISTS idx_stage2_cache_key ON stage2_cache(cache_key)",
-        "CREATE INDEX IF NOT EXISTS idx_normalize_field_alias ON normalize_alias(field, alias_name)",
-        "CREATE INDEX IF NOT EXISTS idx_normalize_canonical ON normalize_alias(field, canonical_name)"
+        "CREATE INDEX IF NOT EXISTS idx_scrape_cache_key ON scrape_cache(cache_key)",
+        "CREATE INDEX IF NOT EXISTS idx_enhance_cache_key ON enhance_cache(cache_key)"
     };
-    
+
     for (const char* idx : indexes) {
         sqlite3_exec(db_, idx, nullptr, nullptr, nullptr);
+    }
+}
+
+// =====================================================================
+// migrate_legacy_tables：旧表名 → 新表名一次性迁移（幂等）
+//   stage1_cache        → scrape_cache
+//   stage2_cache        → enhance_cache
+//   metadata_snapshots  → rollback_snapshot（由 BackupManager 管理，此处不处理）
+//   normalize_alias     → 由 Python 端管理（迁移后由 Python 删除旧表）
+// 迁移策略：检测到旧表存在且新表不存在时，RENAME TABLE；
+//           旧索引 RENAME 后失效，DROP 后由 create_indexes 重建。
+// =====================================================================
+void CacheLayer::migrate_legacy_tables() {
+    if (!db_) return;
+
+    auto table_exists = [this](const std::string& name) -> bool {
+        sqlite3_stmt* stmt = nullptr;
+        std::string q = "SELECT name FROM sqlite_master WHERE type='table' AND name=?";
+        bool exists = false;
+        if (sqlite3_prepare_v2(db_, q.c_str(), -1, &stmt, nullptr) == SQLITE_OK) {
+            sqlite3_bind_text(stmt, 1, name.c_str(), -1, SQLITE_TRANSIENT);
+            if (sqlite3_step(stmt) == SQLITE_ROW) exists = true;
+            sqlite3_finalize(stmt);
+        }
+        return exists;
+    };
+
+    auto exec = [this](const std::string& sql) {
+        char* err = nullptr;
+        if (sqlite3_exec(db_, sql.c_str(), nullptr, nullptr, &err) != SQLITE_OK) {
+            if (err) {
+                LOG_WARN("migrate_legacy_tables: " + std::string(err));
+                sqlite3_free(err);
+            }
+        }
+    };
+
+    // stage1_cache → scrape_cache
+    if (table_exists("stage1_cache") && !table_exists("scrape_cache")) {
+        LOG_INFO("migrate_legacy_tables: Renaming stage1_cache → scrape_cache");
+        exec("DROP INDEX IF EXISTS idx_stage1_cache_key");
+        exec("ALTER TABLE stage1_cache RENAME TO scrape_cache");
+    }
+
+    // stage2_cache → enhance_cache
+    if (table_exists("stage2_cache") && !table_exists("enhance_cache")) {
+        LOG_INFO("migrate_legacy_tables: Renaming stage2_cache → enhance_cache");
+        exec("DROP INDEX IF EXISTS idx_stage2_cache_key");
+        exec("ALTER TABLE stage2_cache RENAME TO enhance_cache");
+    }
+
+    // normalize_alias 旧表：迁移到 Python 端管理后从 C++ 库中删除。
+    // 仅在新库中检测到旧表时执行删除；Python 端在首次启动时会把它迁到独立 db
+    // 或在同库重建（保留 alias_key 列），此后 C++ 端可以放心 DROP。
+    // 为避免与 Python 端迁移冲突，C++ 端只删空表（rows=0 才删）。
+    if (table_exists("normalize_alias")) {
+        sqlite3_stmt* stmt = nullptr;
+        sqlite3_int64 count = -1;
+        if (sqlite3_prepare_v2(db_, "SELECT COUNT(*) FROM normalize_alias", -1, &stmt, nullptr) == SQLITE_OK) {
+            if (sqlite3_step(stmt) == SQLITE_ROW) {
+                count = sqlite3_column_int64(stmt, 0);
+            }
+            sqlite3_finalize(stmt);
+        }
+        if (count == 0) {
+            LOG_INFO("migrate_legacy_tables: Dropping empty legacy normalize_alias table");
+            exec("DROP INDEX IF EXISTS idx_normalize_field_alias");
+            exec("DROP INDEX IF EXISTS idx_normalize_canonical");
+            exec("DROP TABLE IF EXISTS normalize_alias");
+        }
     }
 }
 
@@ -309,10 +373,10 @@ void CacheLayer::clear_all() {
     
     if (!db_) return;
     
-    sqlite3_exec(db_, "DELETE FROM stage1_cache", nullptr, nullptr, nullptr);
-    sqlite3_exec(db_, "DELETE FROM stage2_cache", nullptr, nullptr, nullptr);
+    sqlite3_exec(db_, "DELETE FROM scrape_cache", nullptr, nullptr, nullptr);
+    sqlite3_exec(db_, "DELETE FROM enhance_cache", nullptr, nullptr, nullptr);
     sqlite3_exec(db_, "DELETE FROM cache_statistics", nullptr, nullptr, nullptr);
-    // 注意：normalize_alias 是知识库，不随缓存清空
+    // 注意：normalize_alias 已迁移到 Python 端管理，C++ 端不再清空
 }
 
 int CacheLayer::clear_by_track_ids(const std::vector<std::string>& track_ids) {
@@ -342,7 +406,7 @@ int CacheLayer::clear_by_track_ids(const std::vector<std::string>& track_ids) {
         sqlite3_finalize(stmt1);
     }
     
-    std::string sql2 = "DELETE FROM stage2_cache WHERE track_id IN (" + placeholders + ")";
+    std::string sql2 = "DELETE FROM enhance_cache WHERE track_id IN (" + placeholders + ")";
     sqlite3_stmt* stmt2 = nullptr;
     if (sqlite3_prepare_v2(db_, sql2.c_str(), -1, &stmt2, nullptr) == SQLITE_OK) {
         for (size_t i = 0; i < track_ids.size(); ++i) {
@@ -365,9 +429,9 @@ CacheStatistics CacheLayer::get_statistics() {
     if (!db_) return stats;
     
     const char* sql = R"(
-        SELECT 
-            (SELECT COUNT(*) FROM stage1_cache) + (SELECT COUNT(*) FROM stage2_cache) as total_entries,
-            (SELECT COALESCE(SUM(cache_hit_count), 0) FROM stage1_cache) + (SELECT COALESCE(SUM(cache_hit_count), 0) FROM stage2_cache) as total_hits
+        SELECT
+            (SELECT COUNT(*) FROM scrape_cache) + (SELECT COUNT(*) FROM enhance_cache) as total_entries,
+            (SELECT COALESCE(SUM(cache_hit_count), 0) FROM scrape_cache) + (SELECT COALESCE(SUM(cache_hit_count), 0) FROM enhance_cache) as total_hits
     )";
     
     sqlite3_stmt* stmt = nullptr;
@@ -504,7 +568,7 @@ std::optional<Stage1CacheEntry> CacheLayer::get_stage1(const std::string& cache_
     if (!db_) return std::nullopt;
     
     const char* sql = "SELECT track_id, file_path, title, artist, album, scraped_fields_json, source, success, error_code, error_message "
-                      "FROM stage1_cache WHERE cache_key = ?";
+                      "FROM scrape_cache WHERE cache_key = ?";
     sqlite3_stmt* stmt = nullptr;
     
     if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) {
@@ -556,7 +620,7 @@ std::optional<Stage1CacheEntry> CacheLayer::get_stage1(const std::string& cache_
         
         sqlite3_finalize(stmt);
         
-        const char* update_sql = "UPDATE stage1_cache SET cache_hit_count = cache_hit_count + 1, last_accessed_at = datetime('now') WHERE cache_key = ?";
+        const char* update_sql = "UPDATE scrape_cache SET cache_hit_count = cache_hit_count + 1, last_accessed_at = datetime('now') WHERE cache_key = ?";
         sqlite3_stmt* update_stmt = nullptr;
         if (sqlite3_prepare_v2(db_, update_sql, -1, &update_stmt, nullptr) == SQLITE_OK) {
             sqlite3_bind_text(update_stmt, 1, cache_key.c_str(), -1, SQLITE_TRANSIENT);
@@ -602,8 +666,8 @@ void CacheLayer::set_stage1(const std::string& cache_key, const Stage1CacheEntry
         return result;
     };
     
-    std::string sql = 
-        "INSERT OR REPLACE INTO stage1_cache (cache_key, track_id, file_path, title, artist, album, "
+    std::string sql =
+        "INSERT OR REPLACE INTO scrape_cache (cache_key, track_id, file_path, title, artist, album, "
         "scraped_fields_json, source, success, error_code, error_message, cache_hit_count, last_accessed_at, created_at, updated_at) VALUES ("
         "'" + escape_sql(cache_key) + "', "
         "'" + escape_sql(entry.track_id) + "', "
@@ -631,7 +695,7 @@ std::optional<Stage2CacheEntry> CacheLayer::get_stage2(const std::string& cache_
     
     const char* sql = "SELECT track_id, file_path, title, artist, album, success, title_zh, album_zh, artist_zh, "
                       "translation_confidence, error_code, error_message "
-                      "FROM stage2_cache WHERE cache_key = ?";
+                      "FROM enhance_cache WHERE cache_key = ?";
     sqlite3_stmt* stmt = nullptr;
 
     if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) {
@@ -664,7 +728,7 @@ std::optional<Stage2CacheEntry> CacheLayer::get_stage2(const std::string& cache_
         
         sqlite3_finalize(stmt);
         
-        const char* update_sql = "UPDATE stage2_cache SET cache_hit_count = cache_hit_count + 1, last_accessed_at = datetime('now') WHERE cache_key = ?";
+        const char* update_sql = "UPDATE enhance_cache SET cache_hit_count = cache_hit_count + 1, last_accessed_at = datetime('now') WHERE cache_key = ?";
         sqlite3_stmt* update_stmt = nullptr;
         if (sqlite3_prepare_v2(db_, update_sql, -1, &update_stmt, nullptr) == SQLITE_OK) {
             sqlite3_bind_text(update_stmt, 1, cache_key.c_str(), -1, SQLITE_TRANSIENT);
@@ -698,7 +762,7 @@ void CacheLayer::set_stage2(const std::string& cache_key, const Stage2CacheEntry
     oss << std::fixed << std::setprecision(6);
     
     std::string sql =
-        "INSERT OR REPLACE INTO stage2_cache (cache_key, track_id, file_path, title, artist, album, "
+        "INSERT OR REPLACE INTO enhance_cache (cache_key, track_id, file_path, title, artist, album, "
         "success, title_zh, album_zh, artist_zh, translation_confidence, "
         "error_code, error_message, "
         "cache_hit_count, last_accessed_at, created_at, updated_at) VALUES ("
@@ -724,129 +788,12 @@ void CacheLayer::set_stage2(const std::string& cache_key, const Stage2CacheEntry
 }
 
 // ==================== Normalize Alias ====================
-
-std::vector<AliasEntry> CacheLayer::get_aliases(
-    const std::string& field,
-    const std::vector<std::string>& alias_names
-) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    std::vector<AliasEntry> result;
-    if (!db_ || alias_names.empty()) return result;
-
-    auto escape_sql = [](const std::string& s) -> std::string {
-        std::string r;
-        r.reserve(s.size() * 2);
-        for (char c : s) {
-            if (c == '\'') r += "''";
-            else r += c;
-        }
-        return r;
-    };
-
-    std::string sql = "SELECT field, alias_name, canonical_name, source, confidence, confirmed, reason "
-                      "FROM normalize_alias WHERE field = '" + escape_sql(field) + "' AND alias_name IN (";
-    for (size_t i = 0; i < alias_names.size(); ++i) {
-        if (i > 0) sql += ",";
-        sql += "'" + escape_sql(alias_names[i]) + "'";
-    }
-    sql += ")";
-
-    sqlite3_stmt* stmt = nullptr;
-    if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) == SQLITE_OK) {
-        while (sqlite3_step(stmt) == SQLITE_ROW) {
-            AliasEntry e;
-            e.field        = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
-            e.alias_name   = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
-            e.canonical_name = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
-            e.source       = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
-            e.confidence   = static_cast<float>(sqlite3_column_double(stmt, 4));
-            e.confirmed    = sqlite3_column_int(stmt, 5) != 0;
-            const unsigned char* reason = sqlite3_column_text(stmt, 6);
-            e.reason       = reason ? reinterpret_cast<const char*>(reason) : "";
-            result.push_back(std::move(e));
-        }
-        sqlite3_finalize(stmt);
-    }
-    return result;
-}
-
-bool CacheLayer::upsert_alias(const AliasEntry& entry) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (!db_) return false;
-
-    auto escape_sql = [](const std::string& s) -> std::string {
-        std::string r;
-        r.reserve(s.size() * 2);
-        for (char c : s) {
-            if (c == '\'') r += "''";
-            else r += c;
-        }
-        return r;
-    };
-
-    std::ostringstream oss;
-    oss << std::fixed << std::setprecision(6);
-    oss << "INSERT OR REPLACE INTO normalize_alias "
-        << "(field, alias_name, canonical_name, source, confidence, confirmed, reason, created_time, updated_time) VALUES ("
-        << "'" << escape_sql(entry.field) << "', "
-        << "'" << escape_sql(entry.alias_name) << "', "
-        << "'" << escape_sql(entry.canonical_name) << "', "
-        << "'" << escape_sql(entry.source) << "', "
-        << entry.confidence << ", "
-        << (entry.confirmed ? 1 : 0) << ", "
-        << "'" << escape_sql(entry.reason) << "', "
-        << "datetime('now'), datetime('now'))";
-
-    char* err_msg = nullptr;
-    bool ok = sqlite3_exec(db_, oss.str().c_str(), nullptr, nullptr, &err_msg) == SQLITE_OK;
-    if (!ok && err_msg) sqlite3_free(err_msg);
-    return ok;
-}
-
-bool CacheLayer::batch_upsert_aliases(const std::vector<AliasEntry>& entries) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (!db_ || entries.empty()) return false;
-
-    auto escape_sql = [](const std::string& s) -> std::string {
-        std::string r;
-        r.reserve(s.size() * 2);
-        for (char c : s) {
-            if (c == '\'') r += "''";
-            else r += c;
-        }
-        return r;
-    };
-
-    sqlite3_exec(db_, "BEGIN", nullptr, nullptr, nullptr);
-    bool all_ok = true;
-
-    for (const auto& entry : entries) {
-        std::ostringstream oss;
-        oss << std::fixed << std::setprecision(6);
-        oss << "INSERT OR REPLACE INTO normalize_alias "
-            << "(field, alias_name, canonical_name, source, confidence, confirmed, reason, created_time, updated_time) VALUES ("
-            << "'" << escape_sql(entry.field) << "', "
-            << "'" << escape_sql(entry.alias_name) << "', "
-            << "'" << escape_sql(entry.canonical_name) << "', "
-            << "'" << escape_sql(entry.source) << "', "
-            << entry.confidence << ", "
-            << (entry.confirmed ? 1 : 0) << ", "
-            << "'" << escape_sql(entry.reason) << "', "
-            << "datetime('now'), datetime('now'))";
-
-        char* err_msg = nullptr;
-        if (sqlite3_exec(db_, oss.str().c_str(), nullptr, nullptr, &err_msg) != SQLITE_OK) {
-            all_ok = false;
-            if (err_msg) sqlite3_free(err_msg);
-        }
-    }
-
-    if (all_ok) {
-        sqlite3_exec(db_, "COMMIT", nullptr, nullptr, nullptr);
-    } else {
-        sqlite3_exec(db_, "ROLLBACK", nullptr, nullptr, nullptr);
-    }
-    return all_ok;
-}
+//
+// 注意：normalize_alias 表已迁移到 Python 端管理（NormalizeProcessor 内）。
+//   - 查询：Python NormalizeProcessor.process() 内部用 alias_key 归一化查询
+//   - 写入：C++ 端通过 IPC 调用 worker 的 "save_normalize_aliases" 方法
+//   - 表的 schema 由 Python 端创建和维护
+//
+// 旧表的清理由 migrate_legacy_tables() 处理（仅清理空表，非空表由 Python 端迁移）。
 
 }

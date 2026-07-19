@@ -14,7 +14,7 @@
 namespace ai_metadata {
 
 // 回滚操作类型标识
-// 用于在 metadata_snapshots 表中区分不同操作的初始快照
+// 用于在 rollback_snapshot 表中区分不同操作的初始快照
 // 同一首歌可能同时存在多种类型的回滚记录
 enum class OperationType : int {
     Scrape = 0,     // 歌曲刮削（MusicBrainz/Discogs/AI 元数据获取）

@@ -139,9 +139,34 @@ public:
         const std::vector<std::string>& track_ids
     );
 
-    // Normalize: 批量写入 alias 映射到 SQLite 知识库（用户确认后调用）
-    bool batch_upsert_aliases(const std::vector<AliasEntry>& entries);
-    
+    // 注：batch_upsert_aliases 已移除
+    // normalize_alias 表已迁移到 Python 端 NormalizeStore 管理，
+    // C++ 通过 save_normalize_aliases IPC 方法通知 Python 写入（见 menu_handler.cpp）。
+
+    /**
+     * @brief 保存 normalize alias 映射到 Python 端 SQLite 知识库
+     *
+     * 用户在 Normalize 预览对话框确认后调用。通过 IPC 通知 Python worker 把
+     * 选中的 alias → canonical 映射写入 normalize_alias 表（Python 端管理）。
+     * 后续 normalize 调用会通过 NormalizeStore.get_aliases 命中这些条目，
+     * 跳过 AI 调用。
+     *
+     * @param field 目标字段（artist/album_artist/album/genre/...）
+     * @param entries 待写入的 alias 条目列表，每条包含：
+     *                alias_name / canonical_name / source / confidence / confirmed / reason
+     * @return 是否成功（IPC 发送成功且 Python 返回 success=true）
+     */
+    struct NormalizeAliasEntry {
+        std::string alias_name;
+        std::string canonical_name;
+        std::string source = "ai";
+        double confidence = 1.0;
+        bool confirmed = true;
+        std::string reason;
+    };
+    bool save_normalize_aliases(const std::string& field,
+                                const std::vector<NormalizeAliasEntry>& entries);
+
     bool save_snapshot(
         const std::string& track_id,
         const std::map<std::string, std::string>& snapshot

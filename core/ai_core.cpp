@@ -1476,94 +1476,33 @@ std::optional<NormalizeResult> AICore::normalize_sync(
         return NormalizeResult{};
     }
 
-    // 2. 先查 SQLite normalize_alias 知识库（缓存层职责）
-    //    SQLite 存储的是原始写法，故直接用原始 alias 字符串查询。
-    //    注意：不做变体预合并，因此若 "X" 命中而 "X "（尾空格）未命中，
-    //    "X " 会送 AI 判断（AI 通常会归到同一 canonical）。
-    std::vector<std::string> all_aliases;
-    all_aliases.reserve(alias_map.size());
-    for (const auto& [k, _] : alias_map) {
-        all_aliases.push_back(k);
+    // =========================================================================
+    // 2. 把全部 alias（含上下文 examples）送 Python worker
+    //
+    // 架构变更（normalize_alias 表迁移到 Python 端管理）：
+    //   - SQLite 查询由 Python 端 NormalizeStore 完成，使用 alias_key 归一化匹配
+    //     （NFC + strip Unicode 空白 + lower），解决 C++ 端精确匹配漏命中变体的问题
+    //   - C++ 端不再预查 SQLite，直接把所有 candidates 送 Python
+    //   - Python 端 NormalizeProcessor.process() 内部完成：
+    //       查 SQLite → 命中直接构造 known_groups → 未命中送 AI → 合并 → 返回 groups
+    //   - 写入也由 C++ 通过 IPC 通知 Python 完成（见 menu_handler 调用
+    //     save_normalize_aliases）
+    //
+    // C++ 端职责简化为：候选收集 + IPC 调度 + 响应解析
+    // =========================================================================
+    std::vector<NormalizeCandidate> all_candidates;
+    all_candidates.reserve(alias_map.size());
+    for (const auto& [_, cand] : alias_map) {
+        NormalizeCandidate nc;
+        nc.alias = cand.alias;
+        nc.examples = cand.examples;
+        all_candidates.push_back(std::move(nc));
     }
 
-    std::vector<AliasEntry> known_aliases;
-    if (cache_) {
-        known_aliases = cache_->get_aliases(options.field, all_aliases);
-        LOG_INFO("normalize_sync: SQLite hit " + std::to_string(known_aliases.size()) +
-                 "/" + std::to_string(all_aliases.size()) + " aliases");
-    }
-
-    // 已知 alias 直接构建为 known_groups（confidence=1.0）
-    // 注意：known_groups 不直接加入 result.groups，而是作为 IPC 参数送给 Python，
-    // 让 Python 的 _merge_pre_groups 把 _clean_candidates 生成的变体 pre_groups
-    // 合并到 known_groups 中。这样能正确处理 SQLite 存的是 trim 过的 alias，
-    // 而 track 实际值带尾空格的情况（变体合并由 Python 统一完成）。
+    // 3. 构造 IPC 请求发送给 Worker
     NormalizeResult result;
-    std::vector<NormalizeGroup> known_groups;
-    std::set<std::string> handled_aliases;  // 已处理的原始 alias 字符串
-
-    // 建立 alias_name → AliasEntry 索引
-    std::map<std::string, const AliasEntry*> known_alias_map;
-    for (const auto& ae : known_aliases) {
-        known_alias_map[ae.alias_name] = &ae;
-    }
-
-    for (const auto& [alias_value, _] : alias_map) {
-        auto it = known_alias_map.find(alias_value);
-        if (it == known_alias_map.end()) continue;
-
-        const AliasEntry* hit = it->second;
-        NormalizeGroup* existing = nullptr;
-        for (auto& g : known_groups) {
-            if (g.canonical_name == hit->canonical_name) {
-                existing = &g;
-                break;
-            }
-        }
-        if (!existing) {
-            NormalizeGroup g;
-            g.canonical_name = hit->canonical_name;
-            g.confidence = hit->confidence;
-            g.reason = hit->reason.empty() ? "SQLite knowledge base hit" : hit->reason;
-            known_groups.push_back(std::move(g));
-            existing = &known_groups.back();
-        }
-        // 加入此 alias（去重）
-        std::set<std::string> in_group(existing->aliases.begin(), existing->aliases.end());
-        if (in_group.insert(alias_value).second) {
-            existing->aliases.push_back(alias_value);
-        }
-        handled_aliases.insert(alias_value);
-    }
-
-    LOG_INFO("normalize_sync: SQLite resolved " + std::to_string(handled_aliases.size()) +
-             "/" + std::to_string(alias_map.size()) + " aliases");
-
-    // 3. 收集未命中的 alias，发送给 AI
-    //    发送的是原始 alias 字符串（含可能的空白/零宽字符变体），
-    //    Python 端 _clean_candidates 会做 Unicode 空白归一化与变体合并，
-    //    返回的 groups.aliases 已包含所有原始变体，C++ 无需再做变体回填。
-    std::vector<NormalizeCandidate> unknown_candidates;
-    for (const auto& [alias_value, cand] : alias_map) {
-        if (handled_aliases.find(alias_value) == handled_aliases.end()) {
-            NormalizeCandidate nc;
-            nc.alias = cand.alias;
-            nc.examples = cand.examples;
-            unknown_candidates.push_back(std::move(nc));
-        }
-    }
-
-    if (unknown_candidates.empty()) {
-        LOG_INFO("normalize_sync: All aliases resolved by SQLite, no AI call needed");
-        // 仍然发送请求给 Python，让它根据 known_groups + track_values 构造 track_updates。
-        // Python 端 process() 检测到 candidates 为空 + known_groups 非空时，
-        // 会直接返回 known_groups + track_updates，不调用 AI。
-        // 这样统一由 Python 构造 track_updates，避免 C++ 端重复实现匹配逻辑。
-    }
-
-    // 4. 构造 IPC 请求发送给 Worker
     std::string task_id = generate_request_id();
-    if (on_progress) on_progress(0, 1, "Calling AI for " + std::to_string(unknown_candidates.size()) + " unknown aliases");
+    if (on_progress) on_progress(0, 1, "Calling AI worker for " + std::to_string(all_candidates.size()) + " aliases");
 
     nlohmann::json request;
     request["method"] = "normalize";
@@ -1574,7 +1513,7 @@ std::optional<NormalizeResult> AICore::normalize_sync(
     nlohmann::json params;
     params["field"] = options.field;
     nlohmann::json candidates_json = nlohmann::json::array();
-    for (const auto& c : unknown_candidates) {
+    for (const auto& c : all_candidates) {
         nlohmann::json cj;
         cj["alias"] = c.alias;
         nlohmann::json exs = nlohmann::json::array();
@@ -1587,24 +1526,8 @@ std::optional<NormalizeResult> AICore::normalize_sync(
         candidates_json.push_back(cj);
     }
     params["candidates"] = candidates_json;
-
-    // 把 SQLite 命中的 known_groups 送给 Python，让 Python 的 _merge_pre_groups
-    // 把 _clean_candidates 生成的变体 pre_groups 合并到 known_groups 中。
-    // 这样能正确处理 SQLite 存的是 trim 过的 alias，而 track 实际值带尾空格的情况。
-    nlohmann::json known_groups_json = nlohmann::json::array();
-    for (const auto& g : known_groups) {
-        nlohmann::json gj;
-        gj["canonical_name"] = g.canonical_name;
-        gj["confidence"] = g.confidence;
-        gj["reason"] = g.reason;
-        nlohmann::json aliases_j = nlohmann::json::array();
-        for (const auto& a : g.aliases) {
-            aliases_j.push_back(a);
-        }
-        gj["aliases"] = aliases_j;
-        known_groups_json.push_back(gj);
-    }
-    params["known_groups"] = known_groups_json;
+    // known_groups 不再由 C++ 端预查 SQLite 构造，留给 Python 端查询时填充
+    params["known_groups"] = nlohmann::json::array();
 
     // 把每个 track 当前 field 的所有 values（multi-value）送给 Python。
     // Python 在生成最终 groups 后，根据 groups 为每个 track 构造目标 values
@@ -1628,7 +1551,7 @@ std::optional<NormalizeResult> AICore::normalize_sync(
     request["params"] = params;
 
     std::string request_str = request.dump();
-    LOG_INFO("normalize_sync: Sending " + std::to_string(unknown_candidates.size()) +
+    LOG_INFO("normalize_sync: Sending " + std::to_string(all_candidates.size()) +
              " candidates to AI worker, task_id=" + task_id);
 
     auto response_promise = std::make_shared<std::promise<BatchResponse>>();
@@ -1764,9 +1687,89 @@ std::optional<NormalizeResult> AICore::normalize_sync(
     return result;
 }
 
-bool AICore::batch_upsert_aliases(const std::vector<AliasEntry>& entries) {
-    if (!cache_ || entries.empty()) return false;
-    return cache_->batch_upsert_aliases(entries);
+// 注：batch_upsert_aliases 已移除
+// normalize_alias 表的写入由 Python 端 NormalizeStore 管理，
+// C++ 端通过 IPC 调用 save_normalize_aliases 方法通知 Python 写入（见 menu_handler.cpp）。
+
+bool AICore::save_normalize_aliases(const std::string& field,
+                                    const std::vector<NormalizeAliasEntry>& entries) {
+    if (!initialized_ || !worker_manager_) {
+        LOG_ERROR("save_normalize_aliases: AICore not initialized");
+        return false;
+    }
+    if (entries.empty()) {
+        LOG_INFO("save_normalize_aliases: empty entries, skip");
+        return true;
+    }
+
+    // 构造 IPC 请求
+    std::string task_id = generate_request_id();
+    nlohmann::json request;
+    request["method"] = "save_normalize_aliases";
+    request["id"] = task_id;
+    request["version"] = 1;
+    request["task_id"] = task_id;
+
+    nlohmann::json params;
+    params["field"] = field;
+    nlohmann::json aliases_json = nlohmann::json::array();
+    for (const auto& e : entries) {
+        nlohmann::json aj;
+        aj["alias_name"] = e.alias_name;
+        aj["canonical_name"] = e.canonical_name;
+        aj["source"] = e.source;
+        aj["confidence"] = e.confidence;
+        aj["confirmed"] = e.confirmed;
+        aj["reason"] = e.reason;
+        aliases_json.push_back(aj);
+    }
+    params["aliases"] = aliases_json;
+    request["params"] = params;
+
+    std::string request_str = request.dump();
+    LOG_INFO("save_normalize_aliases: Sending " + std::to_string(entries.size()) +
+             " aliases (field=" + field + "), task_id=" + task_id);
+
+    // 同步等待响应（写库操作很快，无需 abort 支持）
+    auto response_promise = std::make_shared<std::promise<BatchResponse>>();
+    std::future<BatchResponse> response_future = response_promise->get_future();
+
+    bool sent = worker_manager_->send_request(
+        task_id, request_str,
+        [response_promise](const std::string&, const BatchResponse& resp) {
+            response_promise->set_value(resp);
+        },
+        [response_promise](const std::string&, const ErrorInfo& err) {
+            BatchResponse resp;
+            resp.success = false;
+            resp.error = err;
+            response_promise->set_value(resp);
+        }
+    );
+
+    if (!sent) {
+        LOG_ERROR("save_normalize_aliases: Failed to send request to worker");
+        return false;
+    }
+
+    // 等待响应（短超时即可，写库通常 < 1s）
+    const uint32_t timeout_ms = 10000;  // 10s
+    auto status = response_future.wait_for(std::chrono::milliseconds(timeout_ms));
+    if (status != std::future_status::ready) {
+        LOG_ERROR("save_normalize_aliases: Timeout (" + std::to_string(timeout_ms) + "ms)");
+        return false;
+    }
+
+    BatchResponse response = response_future.get();
+    if (!response.success) {
+        LOG_ERROR("save_normalize_aliases: " +
+            (response.error ? response.error->message : "Unknown error"));
+        return false;
+    }
+
+    LOG_INFO("save_normalize_aliases: Success, " + std::to_string(entries.size()) + " aliases saved");
+    return true;
 }
 
-}
+}  // namespace ai_metadata
+

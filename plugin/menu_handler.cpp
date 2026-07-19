@@ -1590,7 +1590,7 @@ public:
         //     精确匹配可靠。这样用户手动把 uncertain alias 加入 group 后也能正确写入。
         std::map<std::string, std::string> alias_to_canonical;
         std::set<std::string> selected_canonicals;
-        std::vector<AliasEntry> aliases_to_save;
+        std::vector<AICore::NormalizeAliasEntry> aliases_to_save;
         for (size_t i = 0; i < m_result.groups.size(); ++i) {
             if (!selected_groups[i]) continue;
             const auto& g = m_result.groups[i];
@@ -1612,8 +1612,7 @@ public:
                 if (alias_to_canonical.find(alias) == alias_to_canonical.end()) {
                     alias_to_canonical[alias] = g.canonical_name;
                 }
-                AliasEntry ae;
-                ae.field = m_options.field;
+                AICore::NormalizeAliasEntry ae;
                 ae.alias_name = alias;
                 ae.canonical_name = g.canonical_name;
                 ae.source = "ai";
@@ -1629,8 +1628,15 @@ public:
             return;
         }
 
-        // 写入 SQLite 知识库
-        g_ai_core->batch_upsert_aliases(aliases_to_save);
+        // 通过 IPC 通知 Python worker 写入 normalize_alias 表（Python 端管理）
+        // Python 端会自动用 _normalize_key(alias_name) 计算 alias_key 并写入
+        if (!aliases_to_save.empty()) {
+            bool ok = g_ai_core->save_normalize_aliases(m_options.field, aliases_to_save);
+            if (!ok) {
+                console::print("AI Metadata V8: Warning - save_normalize_aliases failed, "
+                               "tag writes will continue but aliases not persisted");
+            }
+        }
 
         // 应用到 Tag。
         // 对每个 track：优先用 Python 的 track_updates.new_values（若 matched 且 canonical 选中），
