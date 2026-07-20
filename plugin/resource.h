@@ -299,3 +299,16 @@
 #define IDD_ROLLBACK_TYPE_SELECT     3073
 #define IDC_ROLLBACK_TYPE_LIST       3229
 #define IDC_ROLLBACK_TYPE_HINT       3230
+
+// ===== Custom Model Configuration Dialog =====
+#define IDD_CUSTOM_MODEL_CONFIG      3074
+#define IDC_API_FORMAT_LABEL         3250
+#define IDC_API_FORMAT               3251
+#define IDC_CUSTOM_URL_LABEL         3252
+#define IDC_CUSTOM_URL               3253
+#define IDC_CUSTOM_MODEL_ID_LABEL    3254
+#define IDC_CUSTOM_MODEL_ID          3255
+#define IDC_CUSTOM_API_KEY_LABEL     3256
+#define IDC_CUSTOM_API_KEY           3257
+#define IDC_CUSTOM_HINT_TEXT         3258
+#define IDC_CUSTOM_MODEL_CONFIG_BTN  3259

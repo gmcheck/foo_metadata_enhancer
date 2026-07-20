@@ -282,6 +282,20 @@ class ConfigManager:
                     if api_key:
                         self._config["providers"][prov_name]["api_key"] = api_key
                         logger.debug(f"[config_manager.py::_merge_cpp_settings] {prov_name} api_key updated")
+
+                    # 处理自定义模型的 base_url 和 api_format
+                    base_url = str(prov_config.get("base_url", "") or "").strip(" `'\"")
+                    if base_url:
+                        self._config["providers"][prov_name]["base_url"] = base_url
+                        logger.info(f"[config_manager.py::_merge_cpp_settings] {prov_name} base_url = {base_url}")
+
+                    api_format = str(prov_config.get("api_format", "") or "").strip().lower()
+                    if api_format:
+                        self._config["providers"][prov_name]["api_format"] = api_format
+                        if "extra_params" not in self._config["providers"][prov_name]:
+                            self._config["providers"][prov_name]["extra_params"] = {}
+                        self._config["providers"][prov_name]["extra_params"]["api_format"] = api_format
+                        logger.info(f"[config_manager.py::_merge_cpp_settings] {prov_name} api_format = {api_format}")
                 else:
                     logger.debug(f"[config_manager.py::_merge_cpp_settings] Provider {prov_name} not found in config")
         

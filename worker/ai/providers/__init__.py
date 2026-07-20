@@ -17,6 +17,7 @@ from .zhipu_provider import ZhipuProvider
 from .gemini_provider import GeminiProvider
 from .deepseek_provider import DeepSeekProvider
 from .openai_provider import OpenAIProvider
+from .custom_provider import CustomProvider
 from .factory import AIProviderFactory, create_provider
 
 __all__ = [
@@ -30,6 +31,7 @@ __all__ = [
     "ZhipuProvider",
     "GeminiProvider",
     "DeepSeekProvider",
+    "CustomProvider",
     "AIProviderFactory",
     "create_provider",
 ]

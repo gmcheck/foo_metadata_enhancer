@@ -27,6 +27,7 @@ class ProviderType(Enum):
         GEMINI: Google Gemini提供商
         DEEPSEEK: DeepSeek提供商
         OPENAI: OpenAI兼容基类
+        CUSTOM: 自定义模型提供商（支持OpenAI Chat Completions或Anthropic Messages格式）
     """
     OPENROUTER = "openrouter"
     OLLAMA = "ollama"
@@ -34,6 +35,7 @@ class ProviderType(Enum):
     GEMINI = "gemini"
     DEEPSEEK = "deepseek"
     OPENAI = "openai"
+    CUSTOM = "custom"
 
 
 @dataclass
@@ -121,6 +123,12 @@ class ProviderConfig:
         Returns:
             ProviderConfig: 配置实例
         """
+        extra_params = dict(data.get("extra_params") or {})
+        # 兼容顶层 api_format（custom provider / C++ provider_cfg）
+        api_format = data.get("api_format")
+        if api_format and "api_format" not in extra_params:
+            extra_params["api_format"] = api_format
+
         return cls(
             provider_type=provider_type,
             api_key=data.get("api_key", ""),
@@ -130,7 +138,7 @@ class ProviderConfig:
             timeout_ms=data.get("timeout_ms", 30000),
             max_retries=data.get("max_retries", 3),
             retry_delay_ms=data.get("retry_delay_ms", 1000),
-            extra_params=data.get("extra_params", {})
+            extra_params=extra_params
         )
 
 

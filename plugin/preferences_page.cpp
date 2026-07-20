@@ -15,6 +15,7 @@
 #include <sstream>
 #include <algorithm>
 #include <thread>
+#include <tuple>
 #include <nlohmann/json.hpp>
 
 namespace ai_metadata {
@@ -122,9 +123,9 @@ std::vector<ModelInfo> SettingsManager::get_models_for_provider(AIProvider provi
 }
 
 static std::string trim_string(const std::string& s) {
-    size_t start = s.find_first_not_of(" \t\"");
+    size_t start = s.find_first_not_of(" \t\"`");
     if (start == std::string::npos) return "";
-    size_t end = s.find_last_not_of(" \t\"");
+    size_t end = s.find_last_not_of(" \t\"`");
     return s.substr(start, end - start + 1);
 }
 
@@ -546,7 +547,8 @@ void SettingsManager::load_from_config_yaml() {
                  line.find("zhipu:") != std::string::npos ||
                  line.find("gemini:") != std::string::npos ||
                  line.find("ollama:") != std::string::npos ||
-                 line.find("deepseek:") != std::string::npos) {
+                 line.find("deepseek:") != std::string::npos ||
+                 line.find("custom:") != std::string::npos) {
             size_t pos = line.find(':');
             if (pos != std::string::npos) {
                 current_provider = trim_string(line.substr(0, pos));
@@ -587,6 +589,13 @@ void SettingsManager::load_from_config_yaml() {
             if (pos != std::string::npos && !m_settings.provider_configs[string_to_provider(current_provider)].models.empty()) {
                 AIProvider p = string_to_provider(current_provider);
                 m_settings.provider_configs[p].models.back().priority = std::stoi(trim_string(line.substr(pos + 1)));
+            }
+        }
+        else if (in_provider && current_provider == "custom" && line.find("api_format:") != std::string::npos) {
+            size_t pos = line.find(':');
+            if (pos != std::string::npos) {
+                AIProvider p = string_to_provider(current_provider);
+                m_settings.provider_configs[p].api_format = trim_string(line.substr(pos + 1));
             }
         }
         else if (line.find("ai_batch_size:") != std::string::npos) {
@@ -800,10 +809,10 @@ void SettingsManager::load() {
             }
             std::string pc_str = content.substr(pc_start, pc_end - pc_start);
             
-            const char* prov_names[] = {"openrouter", "zhipu", "gemini", "ollama", "deepseek"};
-            AIProvider prov_types[] = {AIProvider::OpenRouter, AIProvider::Zhipu, AIProvider::Gemini, AIProvider::Ollama, AIProvider::DeepSeek};
+            const char* prov_names[] = {"openrouter", "zhipu", "gemini", "ollama", "deepseek", "custom"};
+            AIProvider prov_types[] = {AIProvider::OpenRouter, AIProvider::Zhipu, AIProvider::Gemini, AIProvider::Ollama, AIProvider::DeepSeek, AIProvider::Custom};
 
-            for (int i = 0; i < 5; i++) {
+            for (int i = 0; i < 6; i++) {
                 std::string search_name = std::string("\"") + prov_names[i] + "\":";
                 size_t prov_pos = pc_str.find(search_name);
                 if (prov_pos == std::string::npos) continue;
@@ -840,6 +849,30 @@ void SettingsManager::load() {
                         if (val_end != std::string::npos) {
                             std::string api_key = prov_str.substr(val_start + 1, val_end - val_start - 1);
                             m_settings.provider_configs[prov_types[i]].api_key = api_key;
+                        }
+                    }
+                }
+
+                // 解析 base_url
+                size_t bu_pos = prov_str.find("\"base_url\":");
+                if (bu_pos != std::string::npos) {
+                    size_t val_start = prov_str.find('"', bu_pos + 11);
+                    if (val_start != std::string::npos) {
+                        size_t val_end = prov_str.find('"', val_start + 1);
+                        if (val_end != std::string::npos) {
+                            m_settings.provider_configs[prov_types[i]].base_url = prov_str.substr(val_start + 1, val_end - val_start - 1);
+                        }
+                    }
+                }
+
+                // 解析 api_format
+                size_t af_pos = prov_str.find("\"api_format\":");
+                if (af_pos != std::string::npos) {
+                    size_t val_start = prov_str.find('"', af_pos + 13);
+                    if (val_start != std::string::npos) {
+                        size_t val_end = prov_str.find('"', val_start + 1);
+                        if (val_end != std::string::npos) {
+                            m_settings.provider_configs[prov_types[i]].api_format = prov_str.substr(val_start + 1, val_end - val_start - 1);
                         }
                     }
                 }
@@ -929,7 +962,9 @@ void SettingsManager::save() {
             first_provider = false;
             file << "    \"" << provider_to_string(p) << "\": {\n";
             file << "      \"api_key\": \"" << config.api_key << "\",\n";
-            file << "      \"selected_model\": \"" << config.selected_model << "\"\n";
+            file << "      \"selected_model\": \"" << config.selected_model << "\",\n";
+            file << "      \"base_url\": \"" << config.base_url << "\",\n";
+            file << "      \"api_format\": \"" << config.api_format << "\"\n";
             file << "    }";
         }
         file << "\n  },\n";
@@ -1350,6 +1385,10 @@ INT_PTR CALLBACK AIPreferencePageInstance::dialog_proc(HWND wnd, UINT msg, WPARA
                 case IDC_TEST_API_BTN:
                     self->on_test_api();
                     break;
+
+                case IDC_CUSTOM_MODEL_CONFIG_BTN:
+                    self->on_custom_model_config();
+                    break;
                     
                 case IDC_OPEN_LOG_BTN:
                     self->on_open_log_folder();
@@ -1421,6 +1460,7 @@ void AIPreferencePageInstance::fill_combo_boxes() {
         SendMessageW(combo, CB_INSERTSTRING, 2, (LPARAM)L"Gemini");
         SendMessageW(combo, CB_INSERTSTRING, 3, (LPARAM)L"Ollama");
         SendMessageW(combo, CB_INSERTSTRING, 4, (LPARAM)L"DeepSeek");
+        SendMessageW(combo, CB_INSERTSTRING, 5, (LPARAM)L"Custom");
         SendMessageW(combo, CB_SETCURSEL, static_cast<int>(m_settings.provider), 0);
         update_model_combo();
     }
@@ -1475,6 +1515,23 @@ void AIPreferencePageInstance::update_controls() {
     
     if (GetDlgItem(m_wnd, IDC_API_KEY)) {
         update_api_key_for_provider();
+    }
+    
+    // 显示/隐藏 Custom 模型的 Config 按钮
+    HWND configBtn = GetDlgItem(m_wnd, IDC_CUSTOM_MODEL_CONFIG_BTN);
+    if (configBtn) {
+        bool isCustom = (m_settings.provider == AIProvider::Custom);
+        ShowWindow(configBtn, isCustom ? SW_SHOW : SW_HIDE);
+        // 当 Custom 选中时，显示当前配置摘要
+        if (isCustom) {
+            auto& custom_config = m_settings.provider_configs[AIProvider::Custom];
+            if (!custom_config.base_url.empty() || !custom_config.selected_model.empty()) {
+                std::string status = "Custom: " + custom_config.api_format + " | " +
+                                     custom_config.base_url + " | " +
+                                     custom_config.selected_model;
+                SetDlgItemTextA(m_wnd, IDC_STATUS_TEXT, status.c_str());
+            }
+        }
     }
     
     if (GetDlgItem(m_wnd, IDC_PYTHON_PATH)) {
@@ -1602,6 +1659,13 @@ void AIPreferencePageInstance::on_provider_changed() {
     }
     update_api_key_for_provider();
     update_model_combo();
+    
+    // 更新 Config 按钮的可见性
+    HWND configBtn = GetDlgItem(m_wnd, IDC_CUSTOM_MODEL_CONFIG_BTN);
+    if (configBtn) {
+        ShowWindow(configBtn, (m_settings.provider == AIProvider::Custom) ? SW_SHOW : SW_HIDE);
+    }
+    
     on_changed();
 }
 
@@ -1859,10 +1923,24 @@ void AIPreferencePageInstance::on_test_api() {
     EnableWindow(GetDlgItem(m_wnd, IDC_TEST_API_BTN), FALSE);
     
     SetDlgItemTextA(m_wnd, IDC_STATUS_TEXT, "[2/3] Sending test request to AI provider (timeout: 30s)...");
+
+    // 把当前 UI 配置一并传给 worker，避免 custom provider 依赖 worker 启动时的旧配置
+    const auto& current_cfg = m_settings.get_current_provider_config();
+    nlohmann::json provider_cfg;
+    provider_cfg["api_key"] = api_key;
+    provider_cfg["selected_model"] = model;
+    if (!current_cfg.base_url.empty()) {
+        provider_cfg["base_url"] = current_cfg.base_url;
+    }
+    if (!current_cfg.api_format.empty()) {
+        provider_cfg["api_format"] = current_cfg.api_format;
+        provider_cfg["extra_params"] = nlohmann::json{{"api_format", current_cfg.api_format}};
+    }
+    std::string provider_cfg_json = provider_cfg.dump();
     
     HWND wnd = m_wnd;
-    std::thread([wnd, ai_core, provider_name, model, this]() {
-        std::string result_json = ai_core->test_api_connection(provider_name, model, 30000);
+    std::thread([wnd, ai_core, provider_name, model, provider_cfg_json, this]() {
+        std::string result_json = ai_core->test_api_connection(provider_name, model, 30000, provider_cfg_json);
         
         fb2k::inMainThread([wnd, result_json, provider_name, model, this]() {
             if (!IsWindow(wnd)) {
@@ -2034,6 +2112,166 @@ void AIPreferencePageInstance::on_changed() {
     if (!m_modified) {
         m_modified = true;
         m_callback->on_state_changed();
+    }
+}
+
+// ============================================================================
+// Custom Model Configuration Dialog
+// ============================================================================
+
+/**
+ * @brief 自定义模型配置对话框的数据结构
+ */
+struct CustomModelConfigData {
+    std::string api_format;  // "openai" or "anthropic"
+    std::string base_url;
+    std::string model_id;
+    std::string api_key;
+
+    static INT_PTR WINAPI dialog_proc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam) {
+        if (message == WM_INITDIALOG) {
+            char diag[512];
+            std::snprintf(diag, sizeof(diag),
+                "[CustomModelConfig] WM_INITDIALOG: hDlg=%p lParam=%p",
+                (void*)hDlg, (void*)lParam);
+            Logger::instance().info(diag);
+
+            // 保存数据指针到窗口
+            SetWindowLongPtr(hDlg, GWLP_USERDATA, lParam);
+            auto* data = reinterpret_cast<CustomModelConfigData*>(lParam);
+            if (!data) {
+                Logger::instance().info("[CustomModelConfig] WM_INITDIALOG: data is NULL!");
+                return TRUE;
+            }
+            std::snprintf(diag, sizeof(diag),
+                "[CustomModelConfig] api_format=%s base_url=%s model_id=%s",
+                data->api_format.c_str(), data->base_url.c_str(), data->model_id.c_str());
+            Logger::instance().info(diag);
+
+            // 初始化 API 格式下拉框
+            HWND formatCombo = GetDlgItem(hDlg, IDC_API_FORMAT);
+            std::snprintf(diag, sizeof(diag),
+                "[CustomModelConfig] GetDlgItem(IDC_API_FORMAT) = %p",
+                (void*)formatCombo);
+            Logger::instance().info(diag);
+
+            if (formatCombo) {
+                LRESULT r1 = SendMessageA(formatCombo, CB_RESETCONTENT, 0, 0);
+                LRESULT r2 = SendMessageA(formatCombo, CB_INSERTSTRING, -1, (LPARAM)"OpenAI Chat Completions");
+                LRESULT r3 = SendMessageA(formatCombo, CB_INSERTSTRING, -1, (LPARAM)"Anthropic Messages");
+                LRESULT r4 = SendMessageA(formatCombo, CB_SETCURSEL, (data->api_format == "anthropic") ? 1 : 0, 0);
+                LRESULT count = SendMessageA(formatCombo, CB_GETCOUNT, 0, 0);
+                std::snprintf(diag, sizeof(diag),
+                    "[CustomModelConfig] CB_RESETCONTENT=%ld CB_INSERTSTRING[0]=%ld CB_INSERTSTRING[1]=%ld CB_SETCURSEL=%ld CB_GETCOUNT=%ld",
+                    (long)r1, (long)r2, (long)r3, (long)r4, (long)count);
+                Logger::instance().info(diag);
+            } else {
+                Logger::instance().info("[CustomModelConfig] GetDlgItem(IDC_API_FORMAT) returned NULL!");
+            }
+
+            SetDlgItemTextA(hDlg, IDC_CUSTOM_URL, data->base_url.c_str());
+            SetDlgItemTextA(hDlg, IDC_CUSTOM_MODEL_ID, data->model_id.c_str());
+            SetDlgItemTextA(hDlg, IDC_CUSTOM_API_KEY, data->api_key.c_str());
+            return TRUE;
+        }
+
+        if (message == WM_COMMAND) {
+            if (LOWORD(wParam) == IDOK) {
+                Logger::instance().info("[CustomModelConfig] IDOK pressed");
+                auto* data = reinterpret_cast<CustomModelConfigData*>(
+                    GetWindowLongPtr(hDlg, GWLP_USERDATA));
+                if (data) {
+                    HWND formatCombo = GetDlgItem(hDlg, IDC_API_FORMAT);
+                    if (formatCombo) {
+                        int sel = ComboBox_GetCurSel(formatCombo);
+                        data->api_format = (sel == 1) ? "anthropic" : "openai";
+                    }
+                    char buf[512] = {0};
+                    GetDlgItemTextA(hDlg, IDC_CUSTOM_URL, buf, sizeof(buf));
+                    data->base_url = trim_string(buf);
+                    memset(buf, 0, sizeof(buf));
+                    GetDlgItemTextA(hDlg, IDC_CUSTOM_MODEL_ID, buf, sizeof(buf));
+                    data->model_id = trim_string(buf);
+                    memset(buf, 0, sizeof(buf));
+                    GetDlgItemTextA(hDlg, IDC_CUSTOM_API_KEY, buf, sizeof(buf));
+                    data->api_key = trim_string(buf);
+                }
+                EndDialog(hDlg, IDOK);
+                return TRUE;
+            }
+            if (LOWORD(wParam) == IDCANCEL) {
+                EndDialog(hDlg, IDCANCEL);
+                return TRUE;
+            }
+        }
+        return FALSE;
+    }
+};
+
+void AIPreferencePageInstance::on_custom_model_config() {
+    Logger::instance().info("[CustomModelConfig] on_custom_model_config entered");
+    save_settings();
+
+    auto& config = m_settings.provider_configs[AIProvider::Custom];
+
+    // 准备对话框数据
+    CustomModelConfigData dialog_data;
+    dialog_data.api_format = config.api_format.empty() ? "openai" : config.api_format;
+    dialog_data.base_url = config.base_url;
+    dialog_data.model_id = config.selected_model;
+    dialog_data.api_key = config.api_key;
+
+    {
+        char diag[512];
+        std::snprintf(diag, sizeof(diag),
+            "[CustomModelConfig] calling DialogBoxParam: hInst=%p resId=%d parent=%p",
+            (void*)core_api::get_my_instance(), IDD_CUSTOM_MODEL_CONFIG, (void*)m_wnd);
+        Logger::instance().info(diag);
+    }
+
+    // 显示模态对话框
+    INT_PTR result = DialogBoxParam(
+        core_api::get_my_instance(),
+        MAKEINTRESOURCE(IDD_CUSTOM_MODEL_CONFIG),
+        m_wnd,
+        &CustomModelConfigData::dialog_proc,
+        reinterpret_cast<LPARAM>(&dialog_data)
+    );
+
+    {
+        char diag[512];
+        std::snprintf(diag, sizeof(diag),
+            "[CustomModelConfig] DialogBoxParam returned: result=%ld",
+            (long)result);
+        Logger::instance().info(diag);
+    }
+
+    if (result == IDOK) {
+        config.api_format = dialog_data.api_format;
+        config.base_url = dialog_data.base_url;
+        config.selected_model = dialog_data.model_id;
+        config.api_key = dialog_data.api_key;
+
+        // 更新模型列表
+        bool found = false;
+        for (const auto& m : config.models) {
+            if (m.name == dialog_data.model_id) {
+                found = true;
+                break;
+            }
+        }
+        if (!found && !dialog_data.model_id.empty()) {
+            ModelInfo mi;
+            mi.name = dialog_data.model_id;
+            mi.priority = 1;
+            config.models.push_back(mi);
+        }
+
+        update_api_key_for_provider();
+        update_model_combo();
+        std::string status = "Custom: " + dialog_data.api_format + " | " + dialog_data.base_url + " | " + dialog_data.model_id;
+        SetDlgItemTextA(m_wnd, IDC_STATUS_TEXT, status.c_str());
+        on_changed();
     }
 }
 

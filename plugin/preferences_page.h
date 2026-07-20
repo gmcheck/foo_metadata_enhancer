@@ -17,7 +17,8 @@ enum class AIProvider {
     Zhipu = 1,      ///< 智谱AI提供商
     Gemini = 2,     ///< Google Gemini提供商
     Ollama = 3,     ///< Ollama本地提供商
-    DeepSeek = 4    ///< DeepSeek提供商
+    DeepSeek = 4,   ///< DeepSeek提供商
+    Custom = 5      ///< 自定义模型提供商
 };
 
 /**
@@ -32,6 +33,7 @@ inline const char* provider_to_string(AIProvider p) {
         case AIProvider::Gemini: return "gemini";
         case AIProvider::Ollama: return "ollama";
         case AIProvider::DeepSeek: return "deepseek";
+        case AIProvider::Custom: return "custom";
         default: return "openrouter";
     }
 }
@@ -46,6 +48,7 @@ inline AIProvider string_to_provider(const std::string& s) {
     if (s == "gemini") return AIProvider::Gemini;
     if (s == "ollama") return AIProvider::Ollama;
     if (s == "deepseek") return AIProvider::DeepSeek;
+    if (s == "custom") return AIProvider::Custom;
     return AIProvider::OpenRouter;
 }
 
@@ -89,6 +92,7 @@ struct ProviderConfig {
     std::string base_url;           ///< 基础URL
     std::vector<ModelInfo> models;  ///< 可用模型列表
     std::string selected_model;     ///< 选中的模型
+    std::string api_format;         ///< API格式（仅用于自定义模型："openai"或"anthropic"）
 };
 
 /**
@@ -182,6 +186,7 @@ struct PluginSettings {
         provider_configs[AIProvider::Gemini] = ProviderConfig{};
         provider_configs[AIProvider::Ollama] = ProviderConfig{};
         provider_configs[AIProvider::DeepSeek] = ProviderConfig{};
+        provider_configs[AIProvider::Custom] = ProviderConfig{};
     }
     
     /**
@@ -335,6 +340,7 @@ private:
     void on_restart_workers();
     void on_browse_python();
     void on_export_templates();
+    void on_custom_model_config();
     void on_changed();
     void update_worker_status_display();
     

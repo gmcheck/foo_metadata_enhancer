@@ -369,6 +369,7 @@ def process_test_api(request: Dict) -> Dict:
     params = request.get("params", {})
     provider = params.get("provider", "zhipu")
     model = params.get("model", "")
+    request_provider_cfg = params.get("provider_cfg") or {}
 
     logger.info(f"process_test_api: Testing API for provider={provider}, model={model}")
 
@@ -377,7 +378,7 @@ def process_test_api(request: Dict) -> Dict:
         # 否则用户在 UI 切换 provider 后 test_api 仍然测的是旧 provider。
         providers_cfg = config.config.get("providers", {})
         provider_cfg = providers_cfg.get(provider, {})
-        if not provider_cfg:
+        if not provider_cfg and not request_provider_cfg:
             return create_response(
                 request_id,
                 success=False,
@@ -389,12 +390,36 @@ def process_test_api(request: Dict) -> Dict:
                 }]
             )
 
-        # 复制一份避免污染原配置
-        provider_cfg = dict(provider_cfg)
+        # 复制一份避免污染原配置；请求中的 provider_cfg 覆盖本地配置（支持 custom 热测试）
+        provider_cfg = dict(provider_cfg or {})
+        if isinstance(request_provider_cfg, dict) and request_provider_cfg:
+            for key, value in request_provider_cfg.items():
+                if key == "extra_params" and isinstance(value, dict):
+                    merged_extra = dict(provider_cfg.get("extra_params") or {})
+                    merged_extra.update(value)
+                    provider_cfg["extra_params"] = merged_extra
+                elif value is not None and value != "":
+                    provider_cfg[key] = value
+
+        # 兼容：api_format 既可在顶层，也可在 extra_params 中
+        api_format = provider_cfg.get("api_format") or (provider_cfg.get("extra_params") or {}).get("api_format")
+        if api_format:
+            provider_cfg["api_format"] = api_format
+            extra_params = dict(provider_cfg.get("extra_params") or {})
+            extra_params["api_format"] = api_format
+            provider_cfg["extra_params"] = extra_params
+
         provider_cfg["timeout_ms"] = config.config.get("worker", {}).get("api_timeout_ms", 60000)
         provider_cfg["max_retries"] = 1  # 测试只跑一次
         if model:
             provider_cfg["selected_model"] = model
+
+        logger.info(
+            f"process_test_api: provider_cfg keys={list(provider_cfg.keys())}, "
+            f"base_url={provider_cfg.get('base_url', '')!r}, "
+            f"api_format={provider_cfg.get('api_format', '')!r}, "
+            f"selected_model={provider_cfg.get('selected_model', '')!r}"
+        )
 
         provider_instance = AIProviderFactory.create_from_config(provider_cfg, provider)
         logger.info(f"process_test_api: Created provider instance: {provider_instance}")

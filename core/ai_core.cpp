@@ -248,7 +248,8 @@ std::vector<WorkerInfo> AICore::get_worker_info() const {
 std::string AICore::test_api_connection(
     const std::string& provider,
     const std::string& model,
-    uint32_t timeout_ms
+    uint32_t timeout_ms,
+    const std::string& provider_cfg_json
 ) {
     if (!initialized_ || !worker_manager_) {
         nlohmann::json error_result;
@@ -267,6 +268,13 @@ std::string AICore::test_api_connection(
     nlohmann::json params;
     params["provider"] = provider;
     params["model"] = model;
+    if (!provider_cfg_json.empty()) {
+        try {
+            params["provider_cfg"] = nlohmann::json::parse(provider_cfg_json);
+        } catch (const std::exception&) {
+            // 忽略非法 JSON，仍按 provider/model 走配置文件路径
+        }
+    }
     request["params"] = params;
     
     std::string request_str = request.dump();

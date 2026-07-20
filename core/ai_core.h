@@ -325,12 +325,14 @@ public:
      * @param provider AI提供商名称
      * @param model 模型名称
      * @param timeout_ms 超时时间（毫秒）
+     * @param provider_cfg_json 可选的提供商配置 JSON（含 api_key/base_url/api_format 等）
      * @return 测试结果（JSON格式字符串）
      */
     std::string test_api_connection(
         const std::string& provider,
         const std::string& model,
-        uint32_t timeout_ms = 30000
+        uint32_t timeout_ms = 30000,
+        const std::string& provider_cfg_json = ""
     );
 
 private:

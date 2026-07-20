@@ -26,6 +26,7 @@ providers:
     - "openrouter"
     - "deepseek"
     - "ollama"
+    - "custom"
   
   openrouter:
     # OpenRouter API key (get from https://openrouter.ai/)
@@ -103,6 +104,17 @@ providers:
         priority: 3
     extra_params:
       num_ctx: 4096
+
+  custom:
+    # Custom model provider - user configurable endpoint
+    # Supports OpenAI Chat Completions and Anthropic Messages formats
+    api_key: ""
+    base_url: ""
+    models:
+      - name: "custom-model"
+        priority: 1
+    extra_params:
+      api_format: "openai"
 
 # Worker Configuration
 worker:

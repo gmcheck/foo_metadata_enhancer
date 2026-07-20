@@ -14,6 +14,7 @@ from .ollama_provider import OllamaProvider
 from .zhipu_provider import ZhipuProvider
 from .gemini_provider import GeminiProvider
 from .deepseek_provider import DeepSeekProvider
+from .custom_provider import CustomProvider
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +35,7 @@ class AIProviderFactory:
         ProviderType.ZHIPU: ZhipuProvider,
         ProviderType.GEMINI: GeminiProvider,
         ProviderType.DEEPSEEK: DeepSeekProvider,
+        ProviderType.CUSTOM: CustomProvider,
     }
     
     _instances: Dict[str, BaseAIProvider] = {}
@@ -200,12 +202,17 @@ class AIProviderFactory:
                             if env_key:
                                 provider_config["api_key"] = env_key
                         
-                        if provider_config.get("api_key") or default_provider == "ollama":
+                        if provider_config.get("api_key") or default_provider in ("ollama", "custom"):
                             provider_config["timeout_ms"] = config.get("worker", {}).get("api_timeout_ms", 180000)
                             provider_config["max_retries"] = config.get("worker", {}).get("max_retries", 3)
                             
                             selected_model = provider_config.get("selected_model", "")
-                            logger.info(f"Using default provider: {default_provider}, selected_model: {selected_model}")
+                            logger.info(
+                                f"Using default provider: {default_provider}, "
+                                f"selected_model: {selected_model}, "
+                                f"base_url: {provider_config.get('base_url', '')!r}, "
+                                f"api_format: {provider_config.get('api_format') or (provider_config.get('extra_params') or {}).get('api_format', '')!r}"
+                            )
                             return cls.create_from_config(provider_config, default_provider)
             except Exception as e:
                 logger.warning(f"Failed to create default provider '{default_provider}': {e}")
@@ -225,7 +232,7 @@ class AIProviderFactory:
                     continue
             
             api_key = provider_config.get("api_key", "")
-            if not api_key and provider_name != "ollama":
+            if not api_key and provider_name != "ollama" and provider_name != "custom":
                 import os
                 env_key = os.getenv(f"{provider_name.upper()}_API_KEY", "")
                 if env_key:
