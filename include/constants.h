@@ -11,8 +11,8 @@ constexpr uint32_t IPC_MAX_MESSAGE_SIZE = 10 * 1024 * 1024;  ///< IPC最大消�
 constexpr uint32_t IPC_VERSION = 1;                          ///< IPC协议版本号
 
 // 批次处理参数
-constexpr uint32_t DEFAULT_BATCH_SIZE = 50;                  ///< 默认批次大小，Stage1刮削时每批处理的曲目数
-constexpr uint32_t DEFAULT_AI_BATCH_SIZE = 10;               ///< AI批次大小，Stage2增强时每批处理的曲目数
+constexpr uint32_t DEFAULT_BATCH_SIZE = 50;                  ///< 默认批次大小，Scrape 刮削时每批处理的曲目数
+constexpr uint32_t DEFAULT_AI_BATCH_SIZE = 10;               ///< AI 批次大小，Enhance 增强时每批处理的曲目数
 
 // 超时参数
 constexpr uint32_t BASE_TIMEOUT_MS = 120000;                 ///< 基础超时时间（2分钟），批次处理的固定超时

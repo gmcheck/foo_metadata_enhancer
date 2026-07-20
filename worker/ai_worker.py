@@ -11,12 +11,22 @@ import json
 import struct
 import time
 import logging
+import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 
 SCRIPT_DIR = Path(__file__).parent.resolve()
+
+# 进度上报与 stdout 互斥锁统一放到 ipc_utils 模块，
+# 避免模块名 __main__ 导致其它模块无法 import。
+from ipc_utils import (
+    _stdout_write_lock,
+    set_current_request_id,
+    get_current_request_id,
+    write_progress,
+)
 
 print("AI Worker: Starting import...", file=sys.stderr)
 print(f"AI Worker: SCRIPT_DIR = {SCRIPT_DIR}", file=sys.stderr)
@@ -56,8 +66,10 @@ _normalize_store = None
 def get_normalize_store():
     """延迟初始化并返回 NormalizeStore 单例
 
-    db_path 取自 foobar2000 profile 目录下的 foo_metadata_enhancer.db
-    （与 C++ 端 CacheLayer 共享同一个 db 文件）
+    db_path 与 C++ 端 CacheLayer 共享同一个 db 文件。
+    路径: {fb2k_profile}/foo_metadata_enhancer/foo_metadata_enhancer.db
+    注意: _find_foobar_profile() 返回的已经是 foo_metadata_enhancer 目录
+    （包含 settings.json），所以直接在其下放 db 文件，不要再拼子目录。
     """
     global _normalize_store
     if _normalize_store is not None:
@@ -67,15 +79,20 @@ def get_normalize_store():
         from common.config_manager import _find_foobar_profile, _get_expected_settings_path
         from db.normalize_store import NormalizeStore
 
+        # _find_foobar_profile() 返回 foo_metadata_enhancer 目录（含 settings.json）
         profile_dir = _find_foobar_profile()
-        if profile_dir is None:
+        if profile_dir is not None:
+            db_dir = profile_dir
+        else:
+            # 回退：从 settings.json 预期路径推导
             expected = _get_expected_settings_path()
             if expected is not None:
-                db_path = expected.parent / "foo_metadata_enhancer.db"
+                db_dir = expected.parent
             else:
-                db_path = SCRIPT_DIR / "foo_metadata_enhancer.db"
-        else:
-            db_path = profile_dir / "foo_metadata_enhancer.db"
+                db_dir = SCRIPT_DIR
+
+        db_dir.mkdir(parents=True, exist_ok=True)
+        db_path = db_dir / "foo_metadata_enhancer.db"
 
         _normalize_store = NormalizeStore(str(db_path))
         logger.info(f"get_normalize_store: opened db at {db_path}")
@@ -87,15 +104,15 @@ def get_normalize_store():
 try:
     from common.models import (
         IPCResponse,
-        Stage1ScrapingResponseModel,
-        Stage1ScrapingResultModel,
-        Stage1ScrapedFieldModel,
-        create_stage1_scraping_result,
-        create_stage1_error_result,
-        Stage2EnhancementResponseModel,
-        Stage2EnhancementResultModel,
-        create_stage2_enhancement_result,
-        create_stage2_error_result
+        ScrapeResponseModel,
+        ScrapeResultModel,
+        ScrapeFieldModel,
+        create_scrape_result,
+        create_scrape_error_result,
+        EnhanceResponseModel,
+        EnhanceResultModel,
+        create_enhance_result,
+        create_enhance_error_result
     )
     print("AI Worker: Pydantic models imported successfully", file=sys.stderr)
 except Exception as e:
@@ -191,11 +208,12 @@ def write_message(data: Dict) -> bool:
         
         header = struct.pack('>I', len(json_bytes))
         logger.debug(f"write_message: Header bytes: {header.hex()}")
-        
-        sys.stdout.buffer.write(header)
-        sys.stdout.buffer.write(json_bytes)
-        sys.stdout.buffer.flush()
-        
+
+        with _stdout_write_lock:
+            sys.stdout.buffer.write(header)
+            sys.stdout.buffer.write(json_bytes)
+            sys.stdout.buffer.flush()
+
         logger.debug("write_message: Successfully wrote message")
         logger.debug("=" * 80)
         return True
@@ -205,7 +223,7 @@ def write_message(data: Dict) -> bool:
         return False
 
 
-def create_response(request_id: str, success: bool, results: List[Dict] = None, 
+def create_response(request_id: str, success: bool, results: List[Dict] = None,
                    error: Dict = None, task_id: str = "") -> Dict:
     """创建响应消息 - 使用 Pydantic 验证
     
@@ -336,28 +354,30 @@ def process_set_log_level(request: Dict) -> Dict:
 
 def process_test_api(request: Dict) -> Dict:
     """处理API测试请求
-    
+
     发送简单测试消息验证API连接。
-    
+
     Args:
         request: 请求字典，包含provider和model参数
-    
+
     Returns:
         Dict: 测试结果响应
     """
-    from ai.adapter import ModelAdapter
-    
+    from ai.providers import AIProviderFactory
+
     request_id = request.get("id", str(uuid.uuid4()))
     params = request.get("params", {})
     provider = params.get("provider", "zhipu")
     model = params.get("model", "")
-    
+
     logger.info(f"process_test_api: Testing API for provider={provider}, model={model}")
-    
+
     try:
-        adapter = ModelAdapter(config.config)
-        
-        if not adapter.provider:
+        # 必须用 UI 传入的 provider/model 创建实例，而不是 config 里的 default。
+        # 否则用户在 UI 切换 provider 后 test_api 仍然测的是旧 provider。
+        providers_cfg = config.config.get("providers", {})
+        provider_cfg = providers_cfg.get(provider, {})
+        if not provider_cfg:
             return create_response(
                 request_id,
                 success=False,
@@ -365,16 +385,38 @@ def process_test_api(request: Dict) -> Dict:
                     "provider": provider,
                     "model": model,
                     "status": "failed",
-                    "message": "No AI provider configured. Check config.yaml."
+                    "message": f"Provider '{provider}' not found in config."
                 }]
             )
-        
+
+        # 复制一份避免污染原配置
+        provider_cfg = dict(provider_cfg)
+        provider_cfg["timeout_ms"] = config.config.get("worker", {}).get("api_timeout_ms", 60000)
+        provider_cfg["max_retries"] = 1  # 测试只跑一次
+        if model:
+            provider_cfg["selected_model"] = model
+
+        provider_instance = AIProviderFactory.create_from_config(provider_cfg, provider)
+        logger.info(f"process_test_api: Created provider instance: {provider_instance}")
+
+        if not provider_instance:
+            return create_response(
+                request_id,
+                success=False,
+                results=[{
+                    "provider": provider,
+                    "model": model,
+                    "status": "failed",
+                    "message": "Failed to create provider instance."
+                }]
+            )
+
         test_messages = [
             {"role": "system", "content": "You are a music metadata expert. Respond with a JSON object containing a 'genre' field."},
             {"role": "user", "content": "What is the genre of 'Test Song' by 'Test Artist'?"}
         ]
-        
-        response = adapter.provider.chat_completion_json(test_messages, temperature=0.3)
+
+        response = provider_instance.chat_completion_json(test_messages, temperature=0.3)
         
         if response.success:
             try:
@@ -422,8 +464,8 @@ def process_test_api(request: Dict) -> Dict:
         )
 
 
-def process_stage1_scrape(request: Dict) -> Dict:
-    """处理stage1_scrape请求 - 使用 Pydantic 验证
+def process_scrape(request: Dict) -> Dict:
+    """处理scrape请求 - 使用 Pydantic 验证
     
     阶段一：基础元数据刮削和纠正
     
@@ -433,7 +475,7 @@ def process_stage1_scrape(request: Dict) -> Dict:
     Returns:
         Dict: 响应字典，包含刮削结果
     """
-    from core import Stage1Processor
+    from core import ScrapeProcessor
     from abort_checker import set_abort_task, clear_abort_task
     
     request_id = request.get("id", str(uuid.uuid4()))
@@ -443,11 +485,11 @@ def process_stage1_scrape(request: Dict) -> Dict:
     options = params.get("options", {})
     abort_dir = params.get("abort_dir", "")
     
-    logger.info(f"process_stage1_scrape: Request ID = {request_id}, Task ID = {task_id}, tracks = {len(tracks)}")
+    logger.info(f"process_scrape: Request ID = {request_id}, Task ID = {task_id}, tracks = {len(tracks)}")
     
     if abort_dir:
         set_abort_task(task_id, abort_dir)
-        logger.debug(f"process_stage1_scrape: Abort checker enabled, task_id={task_id}")
+        logger.debug(f"process_scrape: Abort checker enabled, task_id={task_id}")
     
     if not tracks:
         clear_abort_task()
@@ -457,38 +499,38 @@ def process_stage1_scrape(request: Dict) -> Dict:
     base_timeout_ms = worker_config.get("base_timeout_ms", 120000)
     per_track_timeout_ms = worker_config.get("per_track_timeout_ms", 60000)
     dynamic_timeout_ms = base_timeout_ms + len(tracks) * per_track_timeout_ms
-    logger.debug(f"process_stage1_scrape: Dynamic timeout = {dynamic_timeout_ms}ms "
+    logger.debug(f"process_scrape: Dynamic timeout = {dynamic_timeout_ms}ms "
                 f"(base={base_timeout_ms} + {len(tracks)} * {per_track_timeout_ms})")
     
     options["_timeout_ms"] = dynamic_timeout_ms
     
     try:
-        processor = Stage1Processor(config.config)
+        processor = ScrapeProcessor(config.config)
         results = processor.process_batch(tracks, options)
         
         validated_results = []
         for i, result in enumerate(results):
             if isinstance(result, dict):
                 if "scraped_fields" in result and result["scraped_fields"]:
-                    logger.debug(f"process_stage1_scrape: Track {i} has scraped_fields: "
+                    logger.debug(f"process_scrape: Track {i} has scraped_fields: "
                                f"{json.dumps(result['scraped_fields'], ensure_ascii=False)[:200]}")
                 validated_results.append(result)
             else:
-                logger.warning(f"process_stage1_scrape: Result {i} is not a dict, converting")
+                logger.warning(f"process_scrape: Result {i} is not a dict, converting")
                 validated_results.append(result if isinstance(result, dict) else {})
         
-        logger.info(f"process_stage1_scrape: Returning {len(validated_results)} validated results")
+        logger.info(f"process_scrape: Returning {len(validated_results)} validated results")
         
         try:
-            pydantic_response = Stage1ScrapingResponseModel(
+            pydantic_response = ScrapeResponseModel(
                 id=request_id,
                 success=True,
                 results=[
-                    Stage1ScrapingResultModel(
+                    ScrapeResultModel(
                         track_id=r.get("track_id", ""),
                         success=r.get("success", False),
                         scraped_fields={
-                            k: Stage1ScrapedFieldModel(**v) 
+                            k: ScrapeFieldModel(**v) 
                             for k, v in r.get("scraped_fields", {}).items()
                         },
                         release_source=r.get("release_source", "ai"),
@@ -498,22 +540,22 @@ def process_stage1_scrape(request: Dict) -> Dict:
                 ]
             )
             response_dict = pydantic_response.to_ipc_dict()
-            logger.debug(f"process_stage1_scrape: Pydantic validation passed, response keys: {list(response_dict.keys())}")
+            logger.debug(f"process_scrape: Pydantic validation passed, response keys: {list(response_dict.keys())}")
         except Exception as pydantic_error:
-            logger.error(f"process_stage1_scrape: Pydantic validation failed: {pydantic_error}", exc_info=True)
+            logger.error(f"process_scrape: Pydantic validation failed: {pydantic_error}", exc_info=True)
             response_dict = create_response(request_id, success=True, results=validated_results)
         
         clear_abort_task()
         return response_dict
     
     except Exception as e:
-        logger.error(f"Error in stage1_scrape: {e}", exc_info=True)
+        logger.error(f"Error in scrape: {e}", exc_info=True)
         clear_abort_task()
         return create_error_response(request_id, "SCRAPE_ERROR", str(e))
 
 
-def process_stage2_enhance(request: Dict) -> Dict:
-    """处理stage2_enhance请求 - 使用 Pydantic 验证
+def process_enhance(request: Dict) -> Dict:
+    """处理enhance请求 - 使用 Pydantic 验证
     
     阶段二：元数据增强（翻译、流派分类、版本识别）
     
@@ -523,7 +565,7 @@ def process_stage2_enhance(request: Dict) -> Dict:
     Returns:
         Dict: 响应字典，包含增强结果
     """
-    from core import Stage2Processor
+    from core import EnhanceProcessor
     from abort_checker import set_abort_task, clear_abort_task
     
     request_id = request.get("id", str(uuid.uuid4()))
@@ -533,11 +575,11 @@ def process_stage2_enhance(request: Dict) -> Dict:
     options = params.get("options", {})
     abort_dir = params.get("abort_dir", "")
     
-    logger.info(f"process_stage2_enhance: Request ID = {request_id}, Task ID = {task_id}, tracks = {len(tracks)}")
+    logger.info(f"process_enhance: Request ID = {request_id}, Task ID = {task_id}, tracks = {len(tracks)}")
     
     if abort_dir:
         set_abort_task(task_id, abort_dir)
-        logger.debug(f"process_stage2_enhance: Abort checker enabled, task_id={task_id}")
+        logger.debug(f"process_enhance: Abort checker enabled, task_id={task_id}")
     
     if not tracks:
         clear_abort_task()
@@ -547,13 +589,13 @@ def process_stage2_enhance(request: Dict) -> Dict:
     base_timeout_ms = worker_config.get("base_timeout_ms", 120000)
     per_track_timeout_ms = worker_config.get("per_track_timeout_ms", 60000)
     dynamic_timeout_ms = base_timeout_ms + len(tracks) * per_track_timeout_ms
-    logger.debug(f"process_stage2_enhance: Dynamic timeout = {dynamic_timeout_ms}ms "
+    logger.debug(f"process_enhance: Dynamic timeout = {dynamic_timeout_ms}ms "
                 f"(base={base_timeout_ms} + {len(tracks)} * {per_track_timeout_ms})")
     
     options["_timeout_ms"] = dynamic_timeout_ms
     
     try:
-        processor = Stage2Processor(config.config)
+        processor = EnhanceProcessor(config.config)
         results = processor.process_batch(tracks, options)
         
         validated_results = []
@@ -561,17 +603,17 @@ def process_stage2_enhance(request: Dict) -> Dict:
             if isinstance(result, dict):
                 validated_results.append(result)
             else:
-                logger.warning(f"process_stage2_enhance: Result {i} is not a dict, converting")
+                logger.warning(f"process_enhance: Result {i} is not a dict, converting")
                 validated_results.append(result if isinstance(result, dict) else {})
         
-        logger.info(f"process_stage2_enhance: Returning {len(validated_results)} validated results")
+        logger.info(f"process_enhance: Returning {len(validated_results)} validated results")
         
         try:
-            pydantic_response = Stage2EnhancementResponseModel(
+            pydantic_response = EnhanceResponseModel(
                 id=request_id,
                 success=True,
                 results=[
-                    Stage2EnhancementResultModel(
+                    EnhanceResultModel(
                         track_id=r.get("track_id", ""),
                         success=r.get("success", False),
                         title_zh=r.get("title_zh", ""),
@@ -587,16 +629,16 @@ def process_stage2_enhance(request: Dict) -> Dict:
                 ]
             )
             response_dict = pydantic_response.to_ipc_dict()
-            logger.debug(f"process_stage2_enhance: Pydantic validation passed, response keys: {list(response_dict.keys())}")
+            logger.debug(f"process_enhance: Pydantic validation passed, response keys: {list(response_dict.keys())}")
         except Exception as pydantic_error:
-            logger.error(f"process_stage2_enhance: Pydantic validation failed: {pydantic_error}", exc_info=True)
+            logger.error(f"process_enhance: Pydantic validation failed: {pydantic_error}", exc_info=True)
             response_dict = create_response(request_id, success=True, results=validated_results)
         
         clear_abort_task()
         return response_dict
     
     except Exception as e:
-        logger.error(f"Error in stage2_enhance: {e}", exc_info=True)
+        logger.error(f"Error in enhance: {e}", exc_info=True)
         clear_abort_task()
         return create_error_response(request_id, "ENHANCE_ERROR", str(e))
 
@@ -793,7 +835,8 @@ def handle_request(request: Dict) -> Optional[Dict]:
     method = request.get("method", "")
     request_id = request.get("id", str(uuid.uuid4()))
     task_id = request.get("task_id", "")
-    
+
+    set_current_request_id(request_id)
     logger.info(f"Handling request: {method} (id: {request_id}, task_id: {task_id})")
     
     if method == "ping":
@@ -804,10 +847,10 @@ def handle_request(request: Dict) -> Optional[Dict]:
         return None
     elif method == "test_api":
         return process_test_api(request)
-    elif method == "stage1_scrape":
-        return process_stage1_scrape(request)
-    elif method == "stage2_enhance":
-        return process_stage2_enhance(request)
+    elif method == "scrape":
+        return process_scrape(request)
+    elif method == "enhance":
+        return process_enhance(request)
     elif method == "normalize":
         return process_normalize(request)
     elif method == "save_normalize_aliases":

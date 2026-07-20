@@ -85,19 +85,17 @@ class ModelAdapter:
             AnalysisResult: 分析结果
         """
         logger.debug(f"ModelAdapter::analyze: Starting analysis with {len(messages)} messages")
-        
+
         if not self.provider:
             logger.error("ModelAdapter::analyze: No AI provider configured")
             return AnalysisResult(
                 success=False,
                 error="No AI provider configured"
             )
-        
+
         logger.debug(f"ModelAdapter::analyze: Calling provider.chat_completion_json")
-        logger.debug(f"ModelAdapter::analyze: Messages = {json.dumps(messages, ensure_ascii=False)[:500]}...")
-        
         response = self.provider.chat_completion_json(messages)
-        
+
         logger.debug(f"ModelAdapter::analyze: Provider response success = {response.success}, model = {response.model}, tokens_used = {response.tokens_used}")
         
         if not response.success:

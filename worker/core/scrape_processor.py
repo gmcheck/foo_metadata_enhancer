@@ -9,7 +9,7 @@ V8.2 三功能边界：
   - 数据源：MusicBrainz / Discogs / AI 降级。
   - 产物：title / artist / album / year / genre / composer / ... / musicbrainz_id。
   - V8.2 变更：genre 改由本层从 MusicBrainz recording 详情获取。
-  - 不做：翻译（归 Stage2 Enhancer）、归一化（归 Normalize）。
+  - 不做：翻译（归 Enhancer）、归一化（归 Normalize）。
 
 V8.1 Architecture:
     Cache → DataSourceManager(并发) → Aggregator → AIResolver
@@ -19,6 +19,10 @@ import logging
 import json
 from dataclasses import dataclass
 from typing import Dict, Any, Optional, List
+
+# 进度上报（避免 C++ 端 max_silence_time_ms 误判）
+# 必须从 ipc_utils 导入：ai_worker.py 作为 __main__ 运行，无法被 import
+from ipc_utils import write_progress as _write_progress
 
 from data_sources import (
     DataSourceManager,
@@ -33,9 +37,9 @@ from .types import TrackInput
 from common.result_formatter import ResultFormatter
 from abort_checker import is_aborted
 from common.models import (
-    Stage1ScrapingResultModel,
-    create_stage1_scraping_result,
-    create_stage1_error_result
+    ScrapeResultModel,
+    create_scrape_result,
+    create_scrape_error_result
 )
 
 logger = logging.getLogger(__name__)
@@ -67,7 +71,7 @@ class ScrapingResult:
     def to_dict(self) -> Dict[str, Any]:
         """转换为字典 - 使用 Pydantic 验证格式"""
         if not self.success or not self.final:
-            error_result = create_stage1_error_result(self.track_id, self.error or "Unknown error")
+            error_result = create_scrape_error_result(self.track_id, self.error or "Unknown error")
             return error_result.to_cpp_dict()
         
         scraped_fields = {}
@@ -87,7 +91,7 @@ class ScrapingResult:
         
         release_source = self.final.source.value if isinstance(self.final.source, DataSourceType) else self.final.source
         
-        pydantic_result = create_stage1_scraping_result(
+        pydantic_result = create_scrape_result(
             track_id=self.track_id,
             success=True,
             scraped_fields=scraped_fields,
@@ -125,7 +129,7 @@ class ScrapingResult:
         return result
 
 
-class Stage1Processor:
+class ScrapeProcessor:
     """阶段一处理器
     
     V8.1 数据流架构：
@@ -156,7 +160,7 @@ class Stage1Processor:
         self._resolver = AIResolver(config)
         self._result_formatter = ResultFormatter(config)
         
-        logger.info("Stage1Processor initialized with V8.1 architecture")
+        logger.info("ScrapeProcessor initialized with V8.1 architecture")
     
     def validate_tracks(self, tracks: List[TrackInput]) -> List[MissingFieldInfo]:
         """验证音轨是否满足前置条件
@@ -206,14 +210,14 @@ class Stage1Processor:
             List[ScrapingResult]: 刮削结果列表
         """
         logger.info(
-            f"Stage1Processor::scrape: BEGIN, tracks={len(tracks)}, "
+            f"ScrapeProcessor::scrape: BEGIN, tracks={len(tracks)}, "
             f"data_sources={options.data_sources if hasattr(options, 'data_sources') else 'all'}"
         )
 
         missing = self.validate_tracks(tracks)
         if missing:
             logger.warning(
-                f"Stage1Processor::scrape: {len(missing)}/{len(tracks)} tracks have missing required fields, "
+                f"ScrapeProcessor::scrape: {len(missing)}/{len(tracks)} tracks have missing required fields, "
                 f"first_missing={missing[0].missing_fields if missing else []}"
             )
             return [
@@ -234,7 +238,7 @@ class Stage1Processor:
 
         for i, track in enumerate(tracks):
             if is_aborted():
-                logger.warning(f"Stage1Processor::scrape: ABORTED at track {i+1}/{len(tracks)}")
+                logger.warning(f"ScrapeProcessor::scrape: ABORTED at track {i+1}/{len(tracks)}")
                 break
 
             result = self._scrape_single_prepare(track, options)
@@ -244,19 +248,23 @@ class Stage1Processor:
             else:
                 query = track.to_query_input()
                 logger.info(
-                    f"Stage1Processor::scrape: track {i+1}/{len(tracks)} "
+                    f"ScrapeProcessor::scrape: track {i+1}/{len(tracks)} "
                     f"track_id={track.track_id[:16]}, query title='{query.title[:40]}', "
                     f"artist='{query.artist[:40]}', album='{query.album[:40]}'"
                 )
+                _write_progress(
+                    float(i) / len(tracks) * 0.5,
+                    f"track {i+1}/{len(tracks)}: fetching data sources"
+                )
                 raw_candidates = self._data_source_manager.fetch_all(query, options)
                 logger.info(
-                    f"Stage1Processor::scrape: track {i+1} fetch_all done, "
+                    f"ScrapeProcessor::scrape: track {i+1} fetch_all done, "
                     f"raw_candidates={len(raw_candidates)}"
                 )
                 aggregation_result = self._aggregator.aggregate(raw_candidates)
                 candidates = aggregation_result.candidates
                 logger.info(
-                    f"Stage1Processor::scrape: track {i+1} aggregate done, "
+                    f"ScrapeProcessor::scrape: track {i+1} aggregate done, "
                     f"candidates={len(candidates)}"
                 )
 
@@ -269,15 +277,23 @@ class Stage1Processor:
 
         if pending_normal:
             logger.info(
-                f"Stage1Processor::scrape: batch NORMAL resolve, "
+                f"ScrapeProcessor::scrape: batch NORMAL resolve, "
                 f"tracks={len(pending_normal)}, indices={pending_normal_indices}"
             )
             queries = [item[1] for item in pending_normal]
             candidates_list = [item[2] for item in pending_normal]
 
+            _write_progress(
+                0.5,
+                f"AI resolve (normal): {len(pending_normal)} tracks, may take 1-3 min"
+            )
             final_results = self._resolver.resolve_batch(queries, candidates_list, enhanced=False)
+            _write_progress(
+                0.7,
+                f"AI resolve (normal) done: {len(final_results)} results"
+            )
             logger.info(
-                f"Stage1Processor::scrape: normal resolve_batch returned "
+                f"ScrapeProcessor::scrape: normal resolve_batch returned "
                 f"{len(final_results)} results"
             )
 
@@ -296,15 +312,23 @@ class Stage1Processor:
 
         if pending_enhanced:
             logger.info(
-                f"Stage1Processor::scrape: batch ENHANCED resolve, "
+                f"ScrapeProcessor::scrape: batch ENHANCED resolve, "
                 f"tracks={len(pending_enhanced)}, indices={pending_enhanced_indices}"
             )
             queries = [item[1] for item in pending_enhanced]
             candidates_list = [item[2] for item in pending_enhanced]
 
+            _write_progress(
+                0.7,
+                f"AI resolve (enhanced): {len(pending_enhanced)} tracks, may take 1-3 min"
+            )
             final_results = self._resolver.resolve_batch(queries, candidates_list, enhanced=True)
+            _write_progress(
+                0.95,
+                f"AI resolve (enhanced) done: {len(final_results)} results"
+            )
             logger.info(
-                f"Stage1Processor::scrape: enhanced resolve_batch returned "
+                f"ScrapeProcessor::scrape: enhanced resolve_batch returned "
                 f"{len(final_results)} results"
             )
             
@@ -371,4 +395,4 @@ class Stage1Processor:
     
     def close(self):
         """关闭资源"""
-        logger.info("Stage1Processor closed")
+        logger.info("ScrapeProcessor closed")

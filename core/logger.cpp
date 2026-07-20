@@ -111,23 +111,32 @@ void Logger::log_to_file(ai_metadata::constants::LogLevel level, const std::stri
 
 std::string Logger::get_log_file_path() {
     std::string log_path;
-    
+
 #ifdef _WIN32
+    // 缓存计算结果（DLL 路径在进程生命周期内不变）
+    static std::string cached_path;
+    if (!cached_path.empty()) return cached_path;
+
     char dll_path[MAX_PATH] = {0};
     HMODULE hModule = GetModuleHandleA("foo_metadata_enhancer.dll");
     if (hModule) {
         GetModuleFileNameA(hModule, dll_path, MAX_PATH);
-        std::string dll_dir(dll_path);
-        size_t pos = dll_dir.find_last_of("\\/");
+    }
+    if (dll_path[0] != 0) {
+        std::string dll_full(dll_path);
+        size_t pos = dll_full.find_last_of("\\/");
         if (pos != std::string::npos) {
-            std::string logs_dir = dll_dir.substr(0, pos) + "\\foo_metadata_enhancer\\logs";
-            CreateDirectoryA((dll_dir.substr(0, pos) + "\\foo_metadata_enhancer").c_str(), NULL);
+            std::string dll_dir = dll_full.substr(0, pos);
+            std::string base_dir = dll_dir + "\\foo_metadata_enhancer";
+            std::string logs_dir = base_dir + "\\logs";
+            CreateDirectoryA(base_dir.c_str(), NULL);
             CreateDirectoryA(logs_dir.c_str(), NULL);
-            log_path = logs_dir + "\\core.log";
+            cached_path = logs_dir + "\\core.log";
         }
     }
+    log_path = cached_path;
 #endif
-    
+
     return log_path;
 }
 

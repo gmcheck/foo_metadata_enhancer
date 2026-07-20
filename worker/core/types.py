@@ -5,14 +5,14 @@ Core Types Module
 统一的运行时数据类型定义（单一来源）
 
 V8.2 数据模型统一：
-  本模块是 Stage1/Stage2 处理器共享的 TrackInput 唯一定义点。
-  - 不在 stage1_processor.py / stage2_processor.py 中重复定义 TrackInput。
+  本模块是 Scrape/Enhance 处理器共享的 TrackInput 唯一定义点。
+  - 不在 scrape_processor.py / enhance_processor.py 中重复定义 TrackInput。
   - 不在 common/models.py 中重复定义 dataclass 版 TrackInput（Pydantic 版已删除）。
   - IPC 边界（ai_worker.py ↔ C++）的 JSON 校验使用 common/models.py 中的
-    Stage1Scraping* / Stage2Enhancement* Pydantic 模型，与本模块互不重叠。
+    Scrape* / Enhance* Pydantic 模型，与本模块互不重叠。
 
-字段集采用 Stage1 的超集（含 conductor/performer/lyricist 等），
-Stage2 仅使用其中的 title/artist/album/album_artist/year/genre/track_number/
+字段集采用 Scrape 的超集（含 conductor/performer/lyricist 等），
+Enhance 仅使用其中的 title/artist/album/album_artist/year/genre/track_number/
 disc_number/duration_sec/comment/label/composer/musicbrainz_id 子集，多余字段忽略即可。
 """
 
@@ -25,7 +25,7 @@ if TYPE_CHECKING:
 
 @dataclass
 class TrackInput:
-    """音轨输入数据（Stage1/Stage2 共享，单一来源）
+    """音轨输入数据（Scrape/Enhance 共享，单一来源）
 
     Attributes:
         track_id: 音轨 ID（C++ 端传入，用于回传对应结果）
@@ -34,7 +34,7 @@ class TrackInput:
         album: 专辑
         album_artist: 专辑艺术家
         year: 发行年份
-        genre: 流派（已有或由 Stage1 刮削填充）
+        genre: 流派（已有或由 Scrape 刮削填充）
         track_number: 音轨号
         disc_number: 光盘号
         duration_sec: 时长（秒）

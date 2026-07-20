@@ -7,6 +7,7 @@ AI-powered decision layer for metadata selection from candidates
 
 import json
 import logging
+import threading
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass
 
@@ -115,34 +116,63 @@ class AIResolver:
         Returns:
             List[FinalResult]: 最终元数据结果列表
         """
-        logger.debug(f"AIResolver::resolve_batch: {len(queries)} tracks, enhanced={enhanced}")
-        
+        import time as _time
+        _t0 = _time.time()
+        logger.info(f"AIResolver::resolve_batch: BEGIN, {len(queries)} tracks, enhanced={enhanced}")
+
         if not queries:
             return []
-        
+
         for i, (query, candidates) in enumerate(zip(queries, candidates_list)):
             if not candidates:
                 candidates_list[i] = []
-        
+
         if not self.is_available:
             logger.warning("AI resolver not available, using best candidate fallback")
             return [self._select_best_candidate(q, c) for q, c in zip(queries, candidates_list)]
-        
+
         try:
             messages = self._build_batch_resolve_prompt(queries, candidates_list, enhanced)
-            
-            logger.debug(f"[Data] Before model_adapter.analyze: {len(messages)} messages")
-            result = self._model_adapter.analyze(messages)
-            logger.debug(f"[Data] After model_adapter.analyze: success={result.success}")
-            
+
+            logger.info(f"AIResolver::resolve_batch: Calling model_adapter.analyze, messages={len(messages)}")
+
+            # 启动心跳线程：AI 调用是阻塞的，期间定期向 C++ 端发 progress，
+            # 避免触发 max_silence_time_ms 误判导致 worker 被强制重启。
+            heartbeat_stop = threading.Event()
+            heartbeat_interval_s = 10.0  # 每 10 秒发一次
+
+            def _heartbeat():
+                seq = 0
+                while not heartbeat_stop.wait(heartbeat_interval_s):
+                    seq += 1
+                    try:
+                        from ipc_utils import write_progress as _wp
+                        _wp(
+                            0.8,
+                            f"AI calling (heartbeat #{seq}, elapsed={int(_time.time()-_t0)}s, do not restart)"
+                        )
+                    except Exception:
+                        pass
+
+            hb_thread = threading.Thread(target=_heartbeat, daemon=True, name="ai-heartbeat")
+            hb_thread.start()
+
+            try:
+                result = self._model_adapter.analyze(messages)
+            finally:
+                heartbeat_stop.set()
+                hb_thread.join(timeout=2.0)
+
+            logger.info(f"AIResolver::resolve_batch: model_adapter.analyze returned, success={result.success}, elapsed_ms={int((_time.time()-_t0)*1000)}")
+
             if not result.success:
                 logger.warning(f"AI resolve_batch failed: {result.error}")
                 return [self._select_best_candidate(q, c) for q, c in zip(queries, candidates_list)]
-            
+
             parsed_results = self._parse_batch_resolve_result(result.result, queries, candidates_list)
-            logger.debug(f"[Data] After _parse_batch_resolve_result: {len(parsed_results)} results")
+            logger.info(f"AIResolver::resolve_batch: END, {len(parsed_results)}/{len(queries)} results, total_elapsed_ms={int((_time.time()-_t0)*1000)}")
             return parsed_results
-        
+
         except Exception as e:
             logger.error(f"AIResolver resolve_batch error: {e}")
             return [self._select_best_candidate(q, c) for q, c in zip(queries, candidates_list)]
@@ -161,7 +191,7 @@ class AIResolver:
         Returns:
             List[Dict]: 消息列表
         """
-        system_prompt = get_composer(self._config).build_stage1_system_prompt(enhanced=enhanced)
+        system_prompt = get_composer(self._config).build_scrape_system_prompt(enhanced=enhanced)
         
         tracks_data = []
         for i, (query, candidates) in enumerate(zip(queries, candidates_list)):

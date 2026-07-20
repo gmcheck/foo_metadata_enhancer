@@ -89,9 +89,12 @@ bool AICore::initialize() {
     std::string dll_dir = get_dll_dir();
 
     if (cache_path_.empty()) {
-        // 默认数据库路径: {fb2k_profile}/foo_metadata_enhancer.db
+        // 默认数据库路径: {fb2k_profile}/foo_metadata_enhancer/foo_metadata_enhancer.db
+        // 统一放在子目录下，避免 profile 根目录产生多个散文件
         std::string profile_path = get_profile_path();
-        cache_path_ = profile_path + "\\" + constants::cache_db_name();
+        std::string sub_dir = profile_path + "\\foo_metadata_enhancer";
+        CreateDirectoryA(sub_dir.c_str(), NULL);
+        cache_path_ = sub_dir + "\\" + constants::cache_db_name();
     }
 
     if (abort_dir_.empty() && !dll_dir.empty()) {
@@ -318,7 +321,7 @@ std::string AICore::test_api_connection(
     return result.dump();
 }
 
-std::vector<TrackScrapingResult> AICore::stage1_scrape_sync(
+std::vector<TrackScrapingResult> AICore::scrape_sync(
     const std::vector<TrackInput>& tracks,
     const ScrapingOptions& options,
     ProgressCallback on_progress,
@@ -331,7 +334,7 @@ std::vector<TrackScrapingResult> AICore::stage1_scrape_sync(
     }
     
     processing_ = true;
-    LOG_INFO("stage1_scrape_sync: Started for " + std::to_string(tracks.size()) + " tracks");
+    LOG_INFO("scrape_sync: Started for " + std::to_string(tracks.size()) + " tracks");
     
     auto filter_fields_by_options = [&options](const std::map<std::string, ScrapedField>& all_fields) {
         std::map<std::string, ScrapedField> filtered;
@@ -377,8 +380,13 @@ std::vector<TrackScrapingResult> AICore::stage1_scrape_sync(
         std::string cache_key = CacheLayer::generate_cache_key(tracks[i]);
         cache_keys.push_back(cache_key);
         key_to_index[cache_key] = i;
-        
-        auto cached = cache_->get_stage1(cache_key);
+
+        // cache_enabled=false 时跳过缓存读取，所有 track 都走 AI
+        if (!cache_enabled_) {
+            continue;
+        }
+
+        auto cached = cache_->get_scrape(cache_key);
         if (cached) {
             cache_hit[i] = true;
             all_results[i].track_id = tracks[i].track_id;
@@ -386,7 +394,8 @@ std::vector<TrackScrapingResult> AICore::stage1_scrape_sync(
             all_results[i].scraped_fields = filter_fields_by_options(cached->scraped_fields);
             all_results[i].release_source = cached->source;
             all_results[i].error = cached->error_message;
-            Logger::instance().debug("stage1_scrape_sync: Cache hit for track " + tracks[i].track_id, __FILE__, __FUNCTION__);
+            all_results[i].cache_hit = true;
+            Logger::instance().debug("scrape_sync: Cache hit for track " + tracks[i].track_id, __FILE__, __FUNCTION__);
         }
     }
     
@@ -399,14 +408,14 @@ std::vector<TrackScrapingResult> AICore::stage1_scrape_sync(
         }
     }
     
-    Logger::instance().debug("stage1_scrape_sync: Cache hits: " + std::to_string(tracks.size() - uncached_tracks.size()) + 
+    Logger::instance().debug("scrape_sync: Cache hits: " + std::to_string(tracks.size() - uncached_tracks.size()) + 
                            ", need to process: " + std::to_string(uncached_tracks.size()), __FILE__, __FUNCTION__);
     
     if (!uncached_tracks.empty()) {
         const size_t total_tracks = uncached_tracks.size();
         const size_t total_batches = (total_tracks + batch_size_ - 1) / batch_size_;
         
-        Logger::instance().debug("stage1_scrape_sync: Processing " + std::to_string(total_tracks) + 
+        Logger::instance().debug("scrape_sync: Processing " + std::to_string(total_tracks) + 
                                " uncached tracks in " + std::to_string(total_batches) + " batches (batch_size=" + 
                                std::to_string(batch_size_) + ")", __FILE__, __FUNCTION__);
         
@@ -416,14 +425,14 @@ std::vector<TrackScrapingResult> AICore::stage1_scrape_sync(
         
         for (size_t batch_idx = 0; batch_idx < total_batches; ++batch_idx) {
             if (on_abort && on_abort()) {
-                Logger::instance().debug("stage1_scrape_sync: Abort requested before batch " + std::to_string(batch_idx + 1), __FILE__, __FUNCTION__);
+                Logger::instance().debug("scrape_sync: Abort requested before batch " + std::to_string(batch_idx + 1), __FILE__, __FUNCTION__);
                 was_aborted = true;
                 break;
             }
             
             if (on_progress) {
                 int percent = static_cast<int>(batch_idx * 100 / total_batches);
-                std::string msg = "Stage1: " + std::to_string(percent) + "% (batch " + 
+                std::string msg = "Scrape: " + std::to_string(percent) + "% (batch " + 
                                  std::to_string(batch_idx) + "/" + 
                                  std::to_string(total_batches) + ")";
                 on_progress(percent, 100, msg);
@@ -439,14 +448,14 @@ std::vector<TrackScrapingResult> AICore::stage1_scrape_sync(
             
             std::string task_id = generate_request_id();
             
-            LOG_INFO("stage1_scrape_sync: Processing batch " + 
+            LOG_INFO("scrape_sync: Processing batch " + 
                                    std::to_string(batch_idx + 1) + "/" + std::to_string(total_batches) +
                                    " (tracks " + std::to_string(start_idx + 1) + "-" + std::to_string(end_idx) + ")");
             
             auto batch_results = process_batch(batch_tracks, options, task_id, on_abort);
             
             if (on_abort && on_abort()) {
-                Logger::instance().debug("stage1_scrape_sync: Abort detected after batch " + std::to_string(batch_idx + 1), __FILE__, __FUNCTION__);
+                Logger::instance().debug("scrape_sync: Abort detected after batch " + std::to_string(batch_idx + 1), __FILE__, __FUNCTION__);
                 was_aborted = true;
                 clear_abort(task_id);
             }
@@ -460,7 +469,7 @@ std::vector<TrackScrapingResult> AICore::stage1_scrape_sync(
                     fi.error_message = "Batch timeout or worker crash";
                     fi.retry_count = 0;
                     failed_tracks.push_back(fi);
-                    Logger::instance().warning("stage1_scrape_sync: Track " + batch_tracks[j].track_id + " failed, will retry", __FILE__, __FUNCTION__);
+                    Logger::instance().warning("scrape_sync: Track " + batch_tracks[j].track_id + " failed, will retry", __FILE__, __FUNCTION__);
                 }
             }
             
@@ -473,7 +482,7 @@ std::vector<TrackScrapingResult> AICore::stage1_scrape_sync(
             
             if (on_progress) {
                 int percent = static_cast<int>((batch_idx + 1) * 100 / total_batches);
-                std::string msg = "Stage1: " + std::to_string(percent) + "% (batch " + 
+                std::string msg = "Scrape: " + std::to_string(percent) + "% (batch " + 
                                  std::to_string(batch_idx + 1) + "/" + 
                                  std::to_string(total_batches) + ")";
                 on_progress(percent, 100, msg);
@@ -485,7 +494,7 @@ std::vector<TrackScrapingResult> AICore::stage1_scrape_sync(
         }
         
         if (!failed_tracks.empty() && !was_aborted) {
-            Logger::instance().info("stage1_scrape_sync: Retrying " + std::to_string(failed_tracks.size()) + " failed tracks...", __FILE__, __FUNCTION__);
+            Logger::instance().info("scrape_sync: Retrying " + std::to_string(failed_tracks.size()) + " failed tracks...", __FILE__, __FUNCTION__);
             
             std::map<std::string, size_t> track_id_to_uncached_idx;
             for (size_t i = 0; i < uncached_tracks.size(); ++i) {
@@ -497,7 +506,7 @@ std::vector<TrackScrapingResult> AICore::stage1_scrape_sync(
             
             for (size_t retry_batch_idx = 0; retry_batch_idx < total_retry_batches; ++retry_batch_idx) {
                 if (on_abort && on_abort()) {
-                    Logger::instance().debug("stage1_scrape_sync: Abort requested during retry", __FILE__, __FUNCTION__);
+                    Logger::instance().debug("scrape_sync: Abort requested during retry", __FILE__, __FUNCTION__);
                     was_aborted = true;
                     break;
                 }
@@ -520,7 +529,7 @@ std::vector<TrackScrapingResult> AICore::stage1_scrape_sync(
                 if (retry_tracks.empty()) continue;
                 
                 std::string retry_task_id = generate_request_id();
-                LOG_INFO("stage1_scrape_sync: Retry batch " + std::to_string(retry_batch_idx + 1) + "/" + 
+                LOG_INFO("scrape_sync: Retry batch " + std::to_string(retry_batch_idx + 1) + "/" + 
                                        std::to_string(total_retry_batches) + " (" + std::to_string(retry_tracks.size()) + " tracks)");
                 
                 auto retry_results = process_batch(retry_tracks, options, retry_task_id, on_abort);
@@ -529,9 +538,9 @@ std::vector<TrackScrapingResult> AICore::stage1_scrape_sync(
                     size_t uncached_idx = retry_uncached_indices[j];
                     size_t original_idx = uncached_indices[uncached_idx];
                     all_results[original_idx] = retry_results[j];
-                    
+
                     if (retry_results[j].success) {
-                        Logger::instance().info("stage1_scrape_sync: Retry succeeded for track " + retry_results[j].track_id, __FILE__, __FUNCTION__);
+                        Logger::instance().info("scrape_sync: Retry succeeded for track " + retry_results[j].track_id, __FILE__, __FUNCTION__);
                     }
                 }
                 
@@ -542,7 +551,7 @@ std::vector<TrackScrapingResult> AICore::stage1_scrape_sync(
         }
         
         if (was_aborted) {
-            Logger::instance().debug("stage1_scrape_sync: Processing was aborted after " + 
+            Logger::instance().debug("scrape_sync: Processing was aborted after " + 
                                    std::to_string(processed_count) + " tracks", __FILE__, __FUNCTION__);
         }
         
@@ -557,7 +566,7 @@ std::vector<TrackScrapingResult> AICore::stage1_scrape_sync(
         }
         
         if (final_failed > 0) {
-            Logger::instance().info("stage1_scrape_sync: Statistics - Success: " + std::to_string(final_success) + 
+            Logger::instance().info("scrape_sync: Statistics - Success: " + std::to_string(final_success) + 
                                    ", Failed: " + std::to_string(final_failed) + 
                                    " (failed tracks will be cached on next run)", __FILE__, __FUNCTION__);
         }
@@ -568,11 +577,11 @@ std::vector<TrackScrapingResult> AICore::stage1_scrape_sync(
     }
     
     processing_ = false;
-    LOG_INFO("stage1_scrape_sync: Complete, returning " + std::to_string(results.size()) + " results");
+    LOG_INFO("scrape_sync: Complete, returning " + std::to_string(results.size()) + " results");
     return results;
 }
 
-std::vector<EnhancementResult> AICore::stage2_enhance_sync(
+std::vector<EnhancementResult> AICore::enhance_sync(
     const std::vector<TrackInput>& tracks,
     const EnhancementOptions& options,
     ProgressCallback on_progress,
@@ -585,17 +594,22 @@ std::vector<EnhancementResult> AICore::stage2_enhance_sync(
     }
     
     processing_ = true;
-    LOG_INFO("stage2_enhance_sync: Started for " + std::to_string(tracks.size()) + " tracks");
+    LOG_INFO("enhance_sync: Started for " + std::to_string(tracks.size()) + " tracks");
     
     std::vector<std::string> cache_keys;
     std::vector<bool> cache_fully_hit(tracks.size(), false);
     std::vector<EnhancementResult> cached_results(tracks.size());
     
     for (size_t i = 0; i < tracks.size(); ++i) {
-        std::string cache_key = CacheLayer::generate_stage2_cache_key(tracks[i], options);
+        std::string cache_key = CacheLayer::generate_enhance_cache_key(tracks[i], options);
         cache_keys.push_back(cache_key);
-        
-        auto cached = cache_->get_stage2(cache_key);
+
+        // cache_enabled=false 时跳过缓存读取
+        if (!cache_enabled_) {
+            continue;
+        }
+
+        auto cached = cache_->get_enhance(cache_key);
         if (cached) {
             cached_results[i].track_id = tracks[i].track_id;
             cached_results[i].success = cached->success;
@@ -612,9 +626,10 @@ std::vector<EnhancementResult> AICore::stage2_enhance_sync(
 
             if (all_needed_fields_cached && cached->success) {
                 cache_fully_hit[i] = true;
-                Logger::instance().debug("stage2_enhance_sync: Full cache hit for track " + tracks[i].track_id, __FILE__, __FUNCTION__);
+                cached_results[i].cache_hit = true;
+                Logger::instance().debug("enhance_sync: Full cache hit for track " + tracks[i].track_id, __FILE__, __FUNCTION__);
             } else {
-                Logger::instance().debug("stage2_enhance_sync: Partial cache hit for track " + tracks[i].track_id + ", need to fetch missing fields", __FILE__, __FUNCTION__);
+                Logger::instance().debug("enhance_sync: Partial cache hit for track " + tracks[i].track_id + ", need to fetch missing fields", __FILE__, __FUNCTION__);
             }
         }
     }
@@ -628,7 +643,7 @@ std::vector<EnhancementResult> AICore::stage2_enhance_sync(
         }
     }
     
-    Logger::instance().debug("stage2_enhance_sync: Full cache hits: " + std::to_string(tracks.size() - uncached_tracks.size()) + 
+    Logger::instance().debug("enhance_sync: Full cache hits: " + std::to_string(tracks.size() - uncached_tracks.size()) + 
                            ", need to process: " + std::to_string(uncached_tracks.size()), __FILE__, __FUNCTION__);
     
     if (!uncached_tracks.empty()) {
@@ -640,14 +655,14 @@ std::vector<EnhancementResult> AICore::stage2_enhance_sync(
         uint32_t dynamic_timeout_ms = BASE_TIMEOUT_MS + static_cast<uint32_t>(batch_size_) * PER_TRACK_TIMEOUT_MS;
         uint32_t old_max_silence = worker_manager_->get_max_silence_time_ms();
         worker_manager_->set_max_silence_time_ms(dynamic_timeout_ms);
-        Logger::instance().debug("stage2_enhance_sync: Set dynamic timeout to " + std::to_string(dynamic_timeout_ms / 1000) + 
+        Logger::instance().debug("enhance_sync: Set dynamic timeout to " + std::to_string(dynamic_timeout_ms / 1000) + 
                                "s per batch (batch_size=" + std::to_string(batch_size_) + ")", __FILE__, __FUNCTION__);
         
         auto restore_timeout = [this, old_max_silence]() {
             worker_manager_->set_max_silence_time_ms(old_max_silence);
         };
         
-        Logger::instance().debug("stage2_enhance_sync: Processing " + std::to_string(total_tracks) + 
+        Logger::instance().debug("enhance_sync: Processing " + std::to_string(total_tracks) + 
                                " uncached tracks in " + std::to_string(total_batches) + " batches", __FILE__, __FUNCTION__);
         
         bool was_aborted = false;
@@ -655,14 +670,14 @@ std::vector<EnhancementResult> AICore::stage2_enhance_sync(
         
         for (size_t batch_idx = 0; batch_idx < total_batches; ++batch_idx) {
             if (on_abort && on_abort()) {
-                Logger::instance().debug("stage2_enhance_sync: Abort requested before batch " + std::to_string(batch_idx + 1), __FILE__, __FUNCTION__);
+                Logger::instance().debug("enhance_sync: Abort requested before batch " + std::to_string(batch_idx + 1), __FILE__, __FUNCTION__);
                 was_aborted = true;
                 break;
             }
             
             if (on_progress) {
                 int percent = static_cast<int>(batch_idx * 100 / total_batches);
-                std::string msg = "Stage2: " + std::to_string(percent) + "% (batch " + 
+                std::string msg = "Enhance: " + std::to_string(percent) + "% (batch " + 
                                  std::to_string(batch_idx) + "/" + 
                                  std::to_string(total_batches) + ")";
                 on_progress(percent, 100, msg);
@@ -678,12 +693,12 @@ std::vector<EnhancementResult> AICore::stage2_enhance_sync(
             
             std::string task_id = generate_request_id();
             
-            LOG_INFO("stage2_enhance_sync: Processing batch " + 
+            LOG_INFO("enhance_sync: Processing batch " + 
                                    std::to_string(batch_idx + 1) + "/" + std::to_string(total_batches) +
                                    " (tracks " + std::to_string(start_idx + 1) + "-" + std::to_string(end_idx) + ")");
             
             nlohmann::json request;
-            request["method"] = "stage2_enhance";
+            request["method"] = "enhance";
             request["id"] = task_id;
             request["version"] = 1;
             request["task_id"] = task_id;
@@ -757,7 +772,7 @@ std::vector<EnhancementResult> AICore::stage2_enhance_sync(
                 }
                 
                 if (on_abort && on_abort()) {
-                    Logger::instance().debug("stage2_enhance_sync: Abort requested by user", __FILE__, __FUNCTION__);
+                    Logger::instance().debug("enhance_sync: Abort requested by user", __FILE__, __FUNCTION__);
                     request_abort(task_id);
                     was_aborted = true;
                     break;
@@ -766,7 +781,7 @@ std::vector<EnhancementResult> AICore::stage2_enhance_sync(
                 auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                     std::chrono::steady_clock::now() - start_time).count();
                 if (elapsed >= dynamic_timeout_ms) {
-                    LOG_ERROR("stage2_enhance_sync: Batch timeout");
+                    LOG_ERROR("enhance_sync: Batch timeout");
                     batch_timeout = true;
                     break;
                 }
@@ -784,7 +799,7 @@ std::vector<EnhancementResult> AICore::stage2_enhance_sync(
                     fi.reason = FailureReason::Timeout;
                     fi.error_message = "Batch timeout";
                     failed_tracks.push_back(fi);
-                    Logger::instance().warning("stage2_enhance_sync: Track " + batch_tracks[j].track_id + " failed, will retry", __FILE__, __FUNCTION__);
+                    Logger::instance().warning("enhance_sync: Track " + batch_tracks[j].track_id + " failed, will retry", __FILE__, __FUNCTION__);
                 }
                 continue;
             }
@@ -792,7 +807,7 @@ std::vector<EnhancementResult> AICore::stage2_enhance_sync(
             BatchResponse response = response_future.get();
             
             if (!response.success) {
-                LOG_ERROR("stage2_enhance_sync: " + 
+                LOG_ERROR("enhance_sync: " + 
                     (response.error ? response.error->message : "Unknown error"));
                 for (size_t j = 0; j < batch_tracks.size(); ++j) {
                     FailedTrackInfo fi;
@@ -816,6 +831,8 @@ std::vector<EnhancementResult> AICore::stage2_enhance_sync(
                 result.album_zh = r.value("album_zh", "");
                 result.artist_zh = r.value("artist_zh", "");
                 result.translation_confidence = r.value("translation_confidence", 0.0f);
+                result.tokens_used = r.value("tokens_used", 0);
+                result.cache_hit = r.value("cache_hit", false);
 
                 if (r.contains("error") && !r["error"].is_null()) {
                     result.error = r["error"].get<std::string>();
@@ -827,9 +844,13 @@ std::vector<EnhancementResult> AICore::stage2_enhance_sync(
                 if (result.translation_confidence > 0) cached_results[i].translation_confidence = result.translation_confidence;
                 cached_results[i].track_id = result.track_id;
                 cached_results[i].success = result.success;
+                cached_results[i].tokens_used = result.tokens_used;
+                cached_results[i].cache_hit = result.cache_hit;
                 if (!result.error.empty()) cached_results[i].error = result.error;
+
+                // 持久化到缓存由调用方（menu_handler）在用户确认后处理
             }
-            
+
             if (response.results.size() < batch_tracks.size()) {
                 size_t failed_start = response.results.size();
                 for (size_t j = failed_start; j < batch_tracks.size(); ++j) {
@@ -843,7 +864,7 @@ std::vector<EnhancementResult> AICore::stage2_enhance_sync(
             
             if (on_progress) {
                 int percent = static_cast<int>((batch_idx + 1) * 100 / total_batches);
-                std::string msg = "Stage2: " + std::to_string(percent) + "% (batch " + 
+                std::string msg = "Enhance: " + std::to_string(percent) + "% (batch " + 
                                  std::to_string(batch_idx + 1) + "/" + 
                                  std::to_string(total_batches) + ")";
                 on_progress(percent, 100, msg);
@@ -851,7 +872,7 @@ std::vector<EnhancementResult> AICore::stage2_enhance_sync(
         }
         
         if (!failed_tracks.empty() && !was_aborted) {
-            Logger::instance().info("stage2_enhance_sync: Retrying " + std::to_string(failed_tracks.size()) + " failed tracks...", __FILE__, __FUNCTION__);
+            Logger::instance().info("enhance_sync: Retrying " + std::to_string(failed_tracks.size()) + " failed tracks...", __FILE__, __FUNCTION__);
             
             std::map<std::string, size_t> track_id_to_uncached_idx;
             for (size_t i = 0; i < uncached_tracks.size(); ++i) {
@@ -863,7 +884,7 @@ std::vector<EnhancementResult> AICore::stage2_enhance_sync(
             
             for (size_t retry_batch_idx = 0; retry_batch_idx < total_retry_batches; ++retry_batch_idx) {
                 if (on_abort && on_abort()) {
-                    Logger::instance().debug("stage2_enhance_sync: Abort requested during retry", __FILE__, __FUNCTION__);
+                    Logger::instance().debug("enhance_sync: Abort requested during retry", __FILE__, __FUNCTION__);
                     was_aborted = true;
                     break;
                 }
@@ -886,11 +907,11 @@ std::vector<EnhancementResult> AICore::stage2_enhance_sync(
                 if (retry_tracks.empty()) continue;
                 
                 std::string retry_task_id = generate_request_id();
-                LOG_INFO("stage2_enhance_sync: Retry batch " + std::to_string(retry_batch_idx + 1) + "/" + 
+                LOG_INFO("enhance_sync: Retry batch " + std::to_string(retry_batch_idx + 1) + "/" + 
                                        std::to_string(total_retry_batches) + " (" + std::to_string(retry_tracks.size()) + " tracks)");
                 
                 nlohmann::json retry_request;
-                retry_request["method"] = "stage2_enhance";
+                retry_request["method"] = "enhance";
                 retry_request["id"] = retry_task_id;
                 retry_request["version"] = 1;
                 retry_request["task_id"] = retry_task_id;
@@ -959,6 +980,8 @@ std::vector<EnhancementResult> AICore::stage2_enhance_sync(
                     result.album_zh = r.value("album_zh", "");
                     result.artist_zh = r.value("artist_zh", "");
                     result.translation_confidence = r.value("translation_confidence", 0.0f);
+                    result.tokens_used = r.value("tokens_used", 0);
+                    result.cache_hit = r.value("cache_hit", false);
 
                     if (r.contains("error") && !r["error"].is_null()) {
                         result.error = r["error"].get<std::string>();
@@ -970,10 +993,14 @@ std::vector<EnhancementResult> AICore::stage2_enhance_sync(
                     if (result.translation_confidence > 0) cached_results[i].translation_confidence = result.translation_confidence;
                     cached_results[i].track_id = result.track_id;
                     cached_results[i].success = result.success;
+                    cached_results[i].tokens_used = result.tokens_used;
+                    cached_results[i].cache_hit = result.cache_hit;
                     if (!result.error.empty()) cached_results[i].error = result.error;
+
+                    // 持久化到缓存由调用方在用户确认后处理
                     
                     if (result.success) {
-                        Logger::instance().info("stage2_enhance_sync: Retry succeeded for track " + result.track_id, __FILE__, __FUNCTION__);
+                        Logger::instance().info("enhance_sync: Retry succeeded for track " + result.track_id, __FILE__, __FUNCTION__);
                     }
                 }
             }
@@ -982,7 +1009,7 @@ std::vector<EnhancementResult> AICore::stage2_enhance_sync(
         restore_timeout();
         
         if (was_aborted) {
-            Logger::instance().debug("stage2_enhance_sync: Processing was aborted", __FILE__, __FUNCTION__);
+            Logger::instance().debug("enhance_sync: Processing was aborted", __FILE__, __FUNCTION__);
         }
         
         size_t final_success = 0;
@@ -996,7 +1023,7 @@ std::vector<EnhancementResult> AICore::stage2_enhance_sync(
         }
         
         if (final_failed > 0) {
-            Logger::instance().info("stage2_enhance_sync: Statistics - Success: " + std::to_string(final_success) + 
+            Logger::instance().info("enhance_sync: Statistics - Success: " + std::to_string(final_success) + 
                                    ", Failed: " + std::to_string(final_failed), __FILE__, __FUNCTION__);
         }
     }
@@ -1006,7 +1033,7 @@ std::vector<EnhancementResult> AICore::stage2_enhance_sync(
     }
     
     processing_ = false;
-    LOG_INFO("stage2_enhance_sync: Complete, returning " + std::to_string(results.size()) + " results");
+    LOG_INFO("enhance_sync: Complete, returning " + std::to_string(results.size()) + " results");
     return results;
 }
 
@@ -1109,15 +1136,15 @@ bool AICore::has_snapshot(const std::string& track_id) {
     return backup_manager_->has_snapshot(track_id);
 }
 
-std::string AICore::generate_stage1_cache_key(const TrackInput& input) {
+std::string AICore::generate_scrape_cache_key(const TrackInput& input) {
     return CacheLayer::generate_cache_key(input);
 }
 
-std::string AICore::generate_stage2_cache_key(const TrackInput& input, const EnhancementOptions& options) {
-    return CacheLayer::generate_stage2_cache_key(input, options);
+std::string AICore::generate_enhance_cache_key(const TrackInput& input, const EnhancementOptions& options) {
+    return CacheLayer::generate_enhance_cache_key(input, options);
 }
 
-void AICore::save_stage1_cache(
+void AICore::save_scrape_cache(
     const std::string& cache_key,
     const TrackScrapingResult& result,
     const TrackInput& input
@@ -1126,7 +1153,7 @@ void AICore::save_stage1_cache(
         return;
     }
     
-    Stage1CacheEntry cache_entry;
+    ScrapeCacheEntry cache_entry;
     cache_entry.track_id = result.track_id;
     cache_entry.file_path = input.file_path;
     cache_entry.title = input.title;
@@ -1137,11 +1164,11 @@ void AICore::save_stage1_cache(
     cache_entry.success = result.success;
     cache_entry.error_message = result.error;
     
-    cache_->set_stage1(cache_key, cache_entry);
-    Logger::instance().debug("save_stage1_cache: Saved cache for track " + result.track_id, __FILE__, __FUNCTION__);
+    cache_->set_scrape(cache_key, cache_entry);
+    Logger::instance().debug("save_scrape_cache: Saved cache for track " + result.track_id, __FILE__, __FUNCTION__);
 }
 
-void AICore::save_stage2_cache(
+void AICore::save_enhance_cache(
     const std::string& cache_key,
     const EnhancementResult& result,
     const TrackInput& input,
@@ -1151,7 +1178,7 @@ void AICore::save_stage2_cache(
         return;
     }
     
-    Stage2CacheEntry cache_entry;
+    EnhanceCacheEntry cache_entry;
     cache_entry.track_id = result.track_id;
     cache_entry.file_path = input.file_path;
     cache_entry.title = input.title;
@@ -1164,8 +1191,8 @@ void AICore::save_stage2_cache(
     cache_entry.translation_confidence = result.translation_confidence;
     cache_entry.error_message = result.error;
     
-    cache_->set_stage2(cache_key, cache_entry);
-    Logger::instance().debug("save_stage2_cache: Saved cache for track " + result.track_id, __FILE__, __FUNCTION__);
+    cache_->set_enhance(cache_key, cache_entry);
+    Logger::instance().debug("save_enhance_cache: Saved cache for track " + result.track_id, __FILE__, __FUNCTION__);
 }
 
 void AICore::request_abort(const std::string& task_id) {
@@ -1242,7 +1269,7 @@ std::vector<TrackScrapingResult> AICore::process_batch(
     };
     
     nlohmann::json request;
-    request["method"] = "stage1_scrape";
+    request["method"] = "scrape";
     request["id"] = task_id;
     request["version"] = 1;
     request["task_id"] = task_id;
@@ -1673,6 +1700,14 @@ std::optional<NormalizeResult> AICore::normalize_sync(
     LOG_INFO("normalize_sync: Parsed track_updates=" +
              std::to_string(result.track_updates.size()) +
              ", matched=" + std::to_string(matched_count));
+
+    // 解析统计字段（Python 端回填）
+    result.cache_hits = ai_result.value("cache_hits", 0);
+    result.api_calls = ai_result.value("api_calls", 0);
+    result.tokens_used = ai_result.value("tokens_used", 0);
+    LOG_INFO("normalize_sync: Stats cache_hits=" + std::to_string(result.cache_hits) +
+             ", api_calls=" + std::to_string(result.api_calls) +
+             ", tokens_used=" + std::to_string(result.tokens_used));
 
     // 注意：无需变体回填。
     //   原实现中 C++ 发送代表 alias 给 Python，Python 返回的 aliases 只含代表，

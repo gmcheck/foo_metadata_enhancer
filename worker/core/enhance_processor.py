@@ -5,9 +5,9 @@ Stage 2 Processor (Enhancer)
 Metadata enhancement: translation only.
 
 V8.2 Architecture:
-    - Stage1 (Scrape): fetches external facts (title/artist/album/year/genre/...).
-      Genre is now sourced from MusicBrainz in Stage1.
-    - Stage2 (Enhancer): derives NEW VALUE from EXISTING metadata.
+    - Scrape: fetches external facts (title/artist/album/year/genre/...).
+      Genre is now sourced from MusicBrainz in Scrape.
+    - Enhancer: derives NEW VALUE from EXISTING metadata.
       Currently this means Chinese translations (title_zh / album_zh / artist_zh).
       Edition identification has been removed (was unreliable from AI inference).
     - Normalize: ensures consistency of existing tags (e.g., artist normalization).
@@ -62,7 +62,7 @@ class EnhancementResult:
         }
 
 
-class Stage2Processor:
+class EnhanceProcessor:
     """阶段二处理器（Enhancer）
 
     功能：基于已有元数据生成新价值，不获取新事实。
@@ -89,7 +89,7 @@ class Stage2Processor:
         try:
             from ai.adapter import ModelAdapter
             self._model_adapter = ModelAdapter(self._config)
-            logger.info(f"Stage2Processor initialized with provider: {self._model_adapter.get_provider_info()}")
+            logger.info(f"EnhanceProcessor initialized with provider: {self._model_adapter.get_provider_info()}")
         except Exception as e:
             logger.error(f"Failed to initialize model adapter: {e}")
 
@@ -107,7 +107,7 @@ class Stage2Processor:
             List[EnhancementResult]: 增强结果列表
         """
         logger.info(
-            f"Stage2Processor::enhance: BEGIN, tracks={len(tracks)}, "
+            f"EnhanceProcessor::enhance: BEGIN, tracks={len(tracks)}, "
             f"options=translate_title={options.translate_title},"
             f"translate_album={options.translate_album},"
             f"translate_artist={options.translate_artist},"
@@ -115,11 +115,11 @@ class Stage2Processor:
         )
 
         if not tracks:
-            logger.warning("Stage2Processor::enhance: empty track list, returning []")
+            logger.warning("EnhanceProcessor::enhance: empty track list, returning []")
             return []
 
         if is_aborted():
-            logger.warning("Stage2Processor::enhance: ABORTED by user before AI call")
+            logger.warning("EnhanceProcessor::enhance: ABORTED by user before AI call")
             return [
                 EnhancementResult(
                     track_id=t.track_id,
@@ -130,7 +130,7 @@ class Stage2Processor:
             ]
 
         if not self._model_adapter:
-            logger.error("Stage2Processor::enhance: model_adapter is None, cannot call AI")
+            logger.error("EnhanceProcessor::enhance: model_adapter is None, cannot call AI")
             return [
                 EnhancementResult(
                     track_id=t.track_id,
@@ -143,7 +143,7 @@ class Stage2Processor:
         try:
             messages = self._build_batch_enhance_prompt(tracks, options)
             logger.info(
-                f"Stage2Processor::enhance: calling AI, "
+                f"EnhanceProcessor::enhance: calling AI, "
                 f"system_prompt_len={len(messages[0]['content']) if messages else 0}, "
                 f"user_prompt_len={len(messages[1]['content']) if len(messages) > 1 else 0}, "
                 f"tracks_payload={len(tracks)}"
@@ -153,7 +153,7 @@ class Stage2Processor:
 
             if not analysis_result.success:
                 logger.error(
-                    f"Stage2Processor::enhance: AI call FAILED, "
+                    f"EnhanceProcessor::enhance: AI call FAILED, "
                     f"error={analysis_result.error}, "
                     f"model={getattr(analysis_result, 'model', 'unknown')}"
                 )
@@ -167,7 +167,7 @@ class Stage2Processor:
                 ]
 
             logger.info(
-                f"Stage2Processor::enhance: AI call OK, "
+                f"EnhanceProcessor::enhance: AI call OK, "
                 f"model={analysis_result.model}, tokens={analysis_result.tokens_used}, "
                 f"result_type={type(analysis_result.result).__name__}, "
                 f"result_size={len(str(analysis_result.result)) if analysis_result.result else 0}"
@@ -176,7 +176,7 @@ class Stage2Processor:
             return self._parse_batch_result(analysis_result.result, tracks, analysis_result)
 
         except Exception as e:
-            logger.error(f"Stage2Processor::enhance: EXCEPTION {type(e).__name__}: {e}", exc_info=True)
+            logger.error(f"EnhanceProcessor::enhance: EXCEPTION {type(e).__name__}: {e}", exc_info=True)
             return [
                 EnhancementResult(
                     track_id=t.track_id,
@@ -197,7 +197,7 @@ class Stage2Processor:
         Returns:
             List[Dict]: 消息列表
         """
-        # Stage2 仅做翻译：构建翻译任务子集
+        # Enhance 仅做翻译：构建翻译任务子集
         translation_tasks = []
         if options.translate_title:
             translation_tasks.append("title_zh")
@@ -243,7 +243,7 @@ Remember:
 - Do NOT leave *_zh fields empty for English/Japanese/Korean content"""
 
         return [
-            {"role": "system", "content": get_composer(self._config).build_stage2_system_prompt()},
+            {"role": "system", "content": get_composer(self._config).build_enhance_system_prompt()},
             {"role": "user", "content": user_content}
         ]
 
@@ -260,7 +260,7 @@ Remember:
             List[EnhancementResult]: 增强结果列表
         """
         if not result:
-            logger.warning("Stage2Processor::_parse_batch_result: empty AI response")
+            logger.warning("EnhanceProcessor::_parse_batch_result: empty AI response")
             return [
                 EnhancementResult(
                     track_id=t.track_id,
@@ -273,17 +273,17 @@ Remember:
         if isinstance(result, dict):
             if "results" in result:
                 results_list = result["results"]
-                logger.info(f"Stage2Processor::_parse_batch_result: dict with 'results' key, "
+                logger.info(f"EnhanceProcessor::_parse_batch_result: dict with 'results' key, "
                             f"items={len(results_list)}")
             else:
                 results_list = [result]
-                logger.info("Stage2Processor::_parse_batch_result: single dict (no 'results' key), "
+                logger.info("EnhanceProcessor::_parse_batch_result: single dict (no 'results' key), "
                             "wrapping as single-item list")
         elif isinstance(result, list):
             results_list = result
-            logger.info(f"Stage2Processor::_parse_batch_result: list response, items={len(results_list)}")
+            logger.info(f"EnhanceProcessor::_parse_batch_result: list response, items={len(results_list)}")
         else:
-            logger.warning(f"Stage2Processor::_parse_batch_result: unexpected result type: {type(result)}")
+            logger.warning(f"EnhanceProcessor::_parse_batch_result: unexpected result type: {type(result)}")
             return [
                 EnhancementResult(
                     track_id=t.track_id,
@@ -308,7 +308,7 @@ Remember:
             if matched_result:
                 final_results.append(self._parse_single_result(matched_result, track, analysis_result))
             else:
-                logger.warning(f"Stage2Processor::_parse_batch_result: no matching result for "
+                logger.warning(f"EnhanceProcessor::_parse_batch_result: no matching result for "
                                f"track_id={track_id} (AI returned {len(results_list)} items)")
                 final_results.append(EnhancementResult(
                     track_id=track.track_id,
@@ -317,7 +317,7 @@ Remember:
                 ))
 
         logger.info(
-            f"Stage2Processor::_parse_batch_result: DONE, "
+            f"EnhanceProcessor::_parse_batch_result: DONE, "
             f"parsed={len(final_results)}, success_count="
             f"{sum(1 for r in final_results if r.success)}"
         )
@@ -350,15 +350,15 @@ Remember:
         enhancement_result.artist_zh = clean_value(raw_artist_zh)
         enhancement_result.translation_confidence = raw_conf
 
-        # 显式忽略 AI 可能误返回的 genre / edition（已不属于 Stage2 职责）
-        # genre 由 Stage1 从 MusicBrainz 抓取；edition 已废弃。
+        # 显式忽略 AI 可能误返回的 genre / edition（已不属于 Enhance 职责）
+        # genre 由 Scrape 从 MusicBrainz 抓取；edition 已废弃。
 
         enhancement_result.model = analysis_result.model
         enhancement_result.model_type = analysis_result.model_type
         enhancement_result.tokens_used = analysis_result.tokens_used
 
         logger.info(
-            f"Stage2Processor::_parse_single_result: track_id={track.track_id}, "
+            f"EnhanceProcessor::_parse_single_result: track_id={track.track_id}, "
             f"title='{track.title[:30]}' -> zh='{enhancement_result.title_zh[:30]}', "
             f"album='{track.album[:30]}' -> zh='{enhancement_result.album_zh[:30]}', "
             f"artist='{track.artist[:30]}' -> zh='{enhancement_result.artist_zh[:30]}', "

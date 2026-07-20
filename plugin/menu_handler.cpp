@@ -1,5 +1,6 @@
 #include "menu_handler.h"
 #include "../core/ai_core.h"
+#include "../core/feedback.h"
 #include "dialogs.h"
 #include "preferences_page.h"
 #include "resource.h"
@@ -137,7 +138,7 @@ static void apply_snapshot_to_info(file_info& info, const std::map<std::string, 
 //   Enhancer : 基于已有元数据生成新价值（翻译），不获取新事实 → 仅影响 TITLE_ZH/ALBUM_ZH/ARTIST_ZH
 //   Normalize: 已有 Tag → 标准 Tag（歌手规范化、Genre 映射等）→ 影响用户选定的 field
 // Scrape 影响：全量（返回空 set 表示全量）
-// Translate 影响：TITLE_ZH / ALBUM_ZH / ARTIST_ZH（Stage2 翻译产物）
+// Translate 影响：TITLE_ZH / ALBUM_ZH / ARTIST_ZH（Enhance 翻译产物）
 // Normalize 影响：ARTIST / ALBUM ARTIST / COMPOSER / PERFORMER 等（用户选的 field）
 static std::set<std::string> get_operation_fields(ai_metadata::OperationType op_type) {
     std::set<std::string> fields;
@@ -216,14 +217,17 @@ static bool ensure_ai_core_initialized() {
     const PluginSettings& settings = SettingsManager::instance().settings();
     g_ai_core->set_taskqueue_batch_size(settings.taskqueue_batch_size);
     g_ai_core->set_ai_batch_size(settings.ai_batch_size);
+    g_ai_core->set_cache_enabled(settings.cache_enabled);
     
     if (!g_ai_core->is_initialized()) {
-        // 设置数据库路径为 {fb2k_profile}/foo_metadata_enhancer.db
+        // 设置数据库路径为 {fb2k_profile}/foo_metadata_enhancer/foo_metadata_enhancer.db
         std::string profile_path = core_api::get_profile_path();
         if (profile_path.find("file://") == 0) {
             profile_path = profile_path.substr(7);
         }
-        g_ai_core->set_cache_path(profile_path + "\\" + constants::cache_db_name());
+        std::string sub_dir = profile_path + "\\foo_metadata_enhancer";
+        CreateDirectoryA(sub_dir.c_str(), NULL);
+        g_ai_core->set_cache_path(sub_dir + "\\" + constants::cache_db_name());
         Logger::instance().info("[ensure_ai_core_initialized] AICore not initialized, calling initialize()");
         bool result = g_ai_core->initialize();
         Logger::instance().info("[ensure_ai_core_initialized] initialize() returned: " + std::string(result ? "true" : "false"));
@@ -235,46 +239,47 @@ static bool ensure_ai_core_initialized() {
 }
 
 enum class V8MenuItemID {
-    STAGE1_SCRAPE = 10,
-    STAGE2_ENHANCE = 11,
+    SCRAPE = 10,
+    ENHANCE = 11,
     ROLLBACK_VERSION = 12,
 };
 
-// 前向声明：Stage2 启动函数，实现在 Stage2EnhanceCallback 定义之后
-static void launch_stage2_enhance_auto(metadb_handle_list tracks,
+// 前向声明：Enhance 启动函数，实现在 EnhanceCallback 定义之后
+static void launch_enhance_auto(metadb_handle_list tracks,
                                         std::vector<TrackInput> inputs,
                                         EnhancementOptions options);
 
-class Stage1ScrapeCallback : public threaded_process_callback {
+class ScrapeCallback : public threaded_process_callback {
 public:
-    Stage1ScrapeCallback(metadb_handle_list tracks, std::vector<TrackInput> inputs, ScrapingOptions options,
-                         bool chain_to_stage2 = false, EnhancementOptions stage2_options = EnhancementOptions{})
+    ScrapeCallback(metadb_handle_list tracks, std::vector<TrackInput> inputs, ScrapingOptions options,
+                         bool chain_to_enhance = false, EnhancementOptions enhance_options = EnhancementOptions{})
         : m_tracks(tracks)
         , m_inputs(std::move(inputs))
         , m_options(options)
-        , m_chain_to_stage2(chain_to_stage2)
-        , m_stage2_options(stage2_options) {}
-    
+        , m_chain_to_enhance(chain_to_enhance)
+        , m_enhance_options(enhance_options) {}
+
     void on_init(HWND p_wnd) override {
-        console::print("AI Metadata V8: Stage 1 scraping started...");
+        console::print("AI Metadata V8: scraping started...");
+        m_start_time = std::chrono::steady_clock::now();
     }
-    
+
     void run(threaded_process_status& p_status, abort_callback& p_abort) override {
         int total = static_cast<int>(m_inputs.size());
-        
+
         p_status.set_progress(0, 100);
-        p_status.set_title("Stage 1 Scraping - 0%");
-        
-        auto results = g_ai_core->stage1_scrape_sync(
+        p_status.set_title("Scraping - 0%");
+
+        auto results = g_ai_core->scrape_sync(
             m_inputs,
             m_options,
             [this, &p_status, total, &p_abort](int current, int total_tracks, const std::string& message) {
                 if (p_abort.is_aborting()) return;
-                
+
                 p_status.set_progress(current, total_tracks);
-                
+
                 pfc::string8 title;
-                title << "Stage 1 Scraping - " << message.c_str();
+                title << "Scraping - " << message.c_str();
                 p_status.set_title(title);
             },
             [&p_abort]() {
@@ -296,17 +301,19 @@ public:
     
     void on_done(HWND p_wnd, bool p_was_aborted) override {
         if (p_was_aborted) {
-            popup_message::g_show("Scraping cancelled by user", "AI Metadata V8");
+            Feedback::info("Scraping cancelled by user");
             return;
         }
-        
+
         if (!m_error_message.empty()) {
-            popup_message::g_show(m_error_message.c_str(), "AI Metadata V8");
+            Feedback::error(m_error_message,
+                            "Scrape pipeline reported an error.",
+                            ErrorCategory::Unknown);
             return;
         }
-        
+
         if (m_results.empty()) {
-            popup_message::g_show("No results returned from scraping", "AI Metadata V8");
+            Feedback::warn("No results returned from scraping.");
             return;
         }
         
@@ -338,9 +345,9 @@ public:
         }
 
         // chain 模式跳过确认对话框，自动应用所有成功结果
-        if (!m_chain_to_stage2) {
+        if (!m_chain_to_enhance) {
             if (!DialogManager::ShowConfirmResultDialog(core_api::get_main_window(), m_results, selected, m_inputs)) {
-                popup_message::g_show("Scraping cancelled by user", "AI Metadata V8");
+                Feedback::info("Scraping cancelled by user");
                 return;
             }
         }
@@ -405,43 +412,50 @@ public:
 
                 if (g_ai_core && g_ai_core->is_initialized()) {
                     // 备份刮削前的状态，支持回滚（Scrape 类型）
-                    Logger::instance().info("[Stage1] Saving Scrape snapshot for track_id=" + m_inputs[i].track_id);
+                    Logger::instance().info("[Scrape] Saving Scrape snapshot for track_id=" + m_inputs[i].track_id);
                     bool snap_ok = g_ai_core->ensure_operation_snapshot(
                         m_inputs[i].track_id,
                         ai_metadata::OperationType::Scrape,
                         original_snapshot
                     );
-                    Logger::instance().info("[Stage1] ensure_operation_snapshot(Scrape) returned " +
+                    Logger::instance().info("[Scrape] ensure_operation_snapshot(Scrape) returned " +
                         std::string(snap_ok ? "true" : "false") + ", track_id=" + m_inputs[i].track_id);
 
-                    std::string cache_key = g_ai_core->generate_stage1_cache_key(m_inputs[i]);
-                    g_ai_core->save_stage1_cache(cache_key, result, m_inputs[i]);
+                    // 缓存命中时不要重写，否则 INSERT OR REPLACE 会把 cache_hit_count 重置为 0
+                    // cache_enabled=false 时跳过缓存写入
+                    bool cache_enabled = SettingsManager::instance().settings().cache_enabled;
+                    if (!result.cache_hit && cache_enabled) {
+                        std::string cache_key = g_ai_core->generate_scrape_cache_key(m_inputs[i]);
+                        g_ai_core->save_scrape_cache(cache_key, result, m_inputs[i]);
+                    } else if (!cache_enabled) {
+                        Logger::instance().info("[Scrape] cache disabled, skip writing cache for track_id=" + m_inputs[i].track_id);
+                    }
                 }
 
                 modified_tracks.add_item(handle);
                 modified_infos.add_item(info);
                 applied++;
-                Logger::instance().info("[Stage1] Added track " + std::to_string(i+1) + " to modified list, applied=" + std::to_string(applied));
+                Logger::instance().info("[Scrape] Added track " + std::to_string(i+1) + " to modified list, applied=" + std::to_string(applied));
             } else {
-                Logger::instance().warning("[Stage1] Failed to get info for track " + std::to_string(i+1));
+                Logger::instance().warning("[Scrape] Failed to get info for track " + std::to_string(i+1));
             }
         }
         
-        Logger::instance().info("[Stage2] Total modified tracks: " + std::to_string(modified_tracks.get_count()));
+        Logger::instance().info("[Enhance] Total modified tracks: " + std::to_string(modified_tracks.get_count()));
         
         if (modified_tracks.get_count() > 0) {
-            Logger::instance().info("[Stage1] Writing to fb2k metadata database: " + 
+            Logger::instance().info("[Scrape] Writing to fb2k metadata database: " + 
                                    std::to_string(modified_tracks.get_count()) + " tracks");
             batch_update_metadata(modified_tracks, modified_infos);
         }
         
-        if (m_chain_to_stage2 && modified_tracks.get_count() > 0) {
-            // chain 模式：用已修改的 info 构建 stage2 输入，自动启动增强
-            std::vector<TrackInput> stage2_inputs;
+        if (m_chain_to_enhance && modified_tracks.get_count() > 0) {
+            // chain 模式：用已修改的 info 构建 enhance 输入，自动启动增强
+            std::vector<TrackInput> enhance_inputs;
             for (size_t i = 0; i < modified_tracks.get_count(); ++i) {
                 file_info_impl info;
                 if (modified_tracks.get_item(i)->get_info(info)) {
-                    stage2_inputs.push_back(extract_track_input(modified_tracks.get_item(i)));
+                    enhance_inputs.push_back(extract_track_input(modified_tracks.get_item(i)));
                 } else {
                     // fallback: 用 modified_infos 中的数据
                     const auto& fi = modified_infos[i];
@@ -462,23 +476,52 @@ public:
                         try { input.year_int = std::stoi(date_str); } catch (...) { input.year_int = 0; }
                     }
                     input.genre = fi.meta_get("GENRE", 0) ? fi.meta_get("GENRE", 0) : "";
-                    stage2_inputs.push_back(input);
+                    enhance_inputs.push_back(input);
                 }
             }
 
-            if (!stage2_inputs.empty()) {
-                console::print("AI Metadata V8: Auto-chaining to Stage 2 Enhancement...");
-                launch_stage2_enhance_auto(modified_tracks, std::move(stage2_inputs), m_stage2_options);
+            if (!enhance_inputs.empty()) {
+                console::print("AI Metadata V8: Auto-chaining to Enhancement...");
+                launch_enhance_auto(modified_tracks, std::move(enhance_inputs), m_enhance_options);
             }
             return;
         }
 
         pfc::string8 msg;
         msg << "Scraping complete: " << applied << "/" << m_results.size() << " tracks updated";
-        if (m_chain_to_stage2) {
+        if (m_chain_to_enhance) {
             msg << "\n\nNo tracks to enhance (scraping produced no results).";
         }
-        popup_message::g_show(msg, "AI Metadata V8");
+        // 流程性结果用 console 输出，不打扰用户
+        Feedback::success(msg.c_str());
+
+        // chain 模式跳过完成对话框（自动衔接 Stage 2，最终由 Stage 2 弹一次）
+        if (!m_chain_to_enhance) {
+            int64_t elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - m_start_time).count();
+            CompletionStats stats;
+            stats.total_tracks = static_cast<int>(m_results.size());
+            stats.success_count = applied;
+            stats.failed_count = static_cast<int>(m_results.size()) - applied;
+            stats.elapsed_ms = elapsed_ms;
+            // Scrape 阶段统计 cache_hits / api_calls；tokens 暂未在 ScrapeResult 中透传
+            for (const auto& r : m_results) {
+                if (r.cache_hit) {
+                    stats.cache_hits++;
+                } else if (r.success) {
+                    stats.api_calls++;
+                }
+                if (!r.success && !r.error.empty()) {
+                    stats.failed_details.push_back(r.track_id + ": " + r.error);
+                }
+            }
+            if (stats.failed_count > 0) {
+                stats.details_label = std::to_string(stats.failed_count) +
+                    " track(s) failed and will retry on next run.";
+            }
+            stats.caption = "Scrape Complete";
+            CompletionDialog::Show(core_api::get_main_window(), stats);
+        }
     }
 
 private:
@@ -487,37 +530,39 @@ private:
     ScrapingOptions m_options;
     std::vector<TrackScrapingResult> m_results;
     std::string m_error_message;
-    bool m_chain_to_stage2 = false;
-    EnhancementOptions m_stage2_options;
+    bool m_chain_to_enhance = false;
+    EnhancementOptions m_enhance_options;
+    std::chrono::steady_clock::time_point m_start_time;
 };
 
-class Stage2EnhanceCallback : public threaded_process_callback {
+class EnhanceCallback : public threaded_process_callback {
 public:
-    Stage2EnhanceCallback(metadb_handle_list tracks, std::vector<TrackInput> inputs, EnhancementOptions options)
+    EnhanceCallback(metadb_handle_list tracks, std::vector<TrackInput> inputs, EnhancementOptions options)
         : m_tracks(tracks)
         , m_inputs(std::move(inputs))
         , m_options(options) {}
     
     void on_init(HWND p_wnd) override {
-        console::print("AI Metadata V8: Stage 2 enhancement started...");
+        console::print("AI Metadata V8: enhancement started...");
+        m_start_time = std::chrono::steady_clock::now();
     }
-    
+
     void run(threaded_process_status& p_status, abort_callback& p_abort) override {
         int total = static_cast<int>(m_inputs.size());
-        
+
         p_status.set_progress(0, 100);
-        p_status.set_title("Stage 2 Enhancement - 0%");
-        
-        auto results = g_ai_core->stage2_enhance_sync(
+        p_status.set_title("Enhancement - 0%");
+
+        auto results = g_ai_core->enhance_sync(
             m_inputs,
             m_options,
             [this, &p_status, total, &p_abort](int current, int total_tracks, const std::string& message) {
                 if (p_abort.is_aborting()) return;
-                
+
                 p_status.set_progress(current, total_tracks);
-                
+
                 pfc::string8 title;
-                title << "Stage 2 Enhancement - " << message.c_str();
+                title << "Enhancement - " << message.c_str();
                 p_status.set_title(title);
             },
             [&p_abort]() {
@@ -539,17 +584,19 @@ public:
     
     void on_done(HWND p_wnd, bool p_was_aborted) override {
         if (p_was_aborted) {
-            popup_message::g_show("Enhancement cancelled by user", "AI Metadata V8");
+            Feedback::info("Enhancement cancelled by user");
             return;
         }
-        
+
         if (!m_error_message.empty()) {
-            popup_message::g_show(m_error_message.c_str(), "AI Metadata V8");
+            Feedback::error(m_error_message,
+                            "Enhancement pipeline reported an error.",
+                            ErrorCategory::Unknown);
             return;
         }
         
         if (m_results.empty()) {
-            popup_message::g_show("No results returned from enhancement", "AI Metadata V8");
+            Feedback::warn("No results returned from enhancement.");
             return;
         }
         
@@ -581,7 +628,7 @@ public:
         }
         
         if (!DialogManager::ShowEnhanceConfirmDialog(core_api::get_main_window(), m_results, selected, m_options, m_inputs)) {
-            popup_message::g_show("Enhancement cancelled by user", "AI Metadata V8");
+            Feedback::info("Enhancement cancelled by user");
             return;
         }
         
@@ -599,7 +646,7 @@ public:
             
             const char* track_path = handle->get_path();
             uint32_t subsong_index = handle->get_subsong_index();
-            Logger::instance().info("[Stage2] Processing track " + std::to_string(i+1) + 
+            Logger::instance().info("[Enhance] Processing track " + std::to_string(i+1) + 
                                    ", path=" + (track_path ? track_path : "null") + 
                                    ", subsong=" + std::to_string(subsong_index));
             
@@ -617,7 +664,7 @@ public:
                 
                 if (should_write_field("title_zh") && !result.title_zh.empty()) {
                     info.meta_set("TITLE_ZH", result.title_zh.c_str());
-                    Logger::instance().info("[Stage2] Set TITLE_ZH: " + result.title_zh);
+                    Logger::instance().info("[Enhance] Set TITLE_ZH: " + result.title_zh);
                     if (result.translation_confidence > 0) {
                         total_conf += result.translation_confidence;
                         conf_count++;
@@ -638,54 +685,88 @@ public:
                 
                 if (g_ai_core && g_ai_core->is_initialized()) {
                     // 备份 Enhance 前的状态，支持回滚（Translate 类型）
-                    Logger::instance().info("[Stage2] Saving Translate snapshot for track_id=" + m_inputs[i].track_id);
+                    Logger::instance().info("[Enhance] Saving Translate snapshot for track_id=" + m_inputs[i].track_id);
                     bool snap_ok = g_ai_core->ensure_operation_snapshot(
                         m_inputs[i].track_id,
                         ai_metadata::OperationType::Translate,
                         original_snapshot
                     );
-                    Logger::instance().info("[Stage2] ensure_operation_snapshot(Translate) returned " +
+                    Logger::instance().info("[Enhance] ensure_operation_snapshot(Translate) returned " +
                         std::string(snap_ok ? "true" : "false") + ", track_id=" + m_inputs[i].track_id);
 
-                    std::string cache_key = g_ai_core->generate_stage2_cache_key(m_inputs[i], m_options);
-                    g_ai_core->save_stage2_cache(cache_key, result, m_inputs[i], m_options);
+                    // cache_enabled=false 时跳过缓存写入
+                    bool cache_enabled = SettingsManager::instance().settings().cache_enabled;
+                    if (cache_enabled) {
+                        std::string cache_key = g_ai_core->generate_enhance_cache_key(m_inputs[i], m_options);
+                        g_ai_core->save_enhance_cache(cache_key, result, m_inputs[i], m_options);
+                    } else {
+                        Logger::instance().info("[Enhance] cache disabled, skip writing cache for track_id=" + m_inputs[i].track_id);
+                    }
                 }
                 
                 modified_tracks.add_item(handle);
                 modified_infos.add_item(info);
                 applied++;
-                Logger::instance().info("[Stage2] Added track to modified list, applied=" + std::to_string(applied));
+                Logger::instance().info("[Enhance] Added track to modified list, applied=" + std::to_string(applied));
             } else {
-                Logger::instance().warning("[Stage2] Failed to get info for track " + std::to_string(i+1));
+                Logger::instance().warning("[Enhance] Failed to get info for track " + std::to_string(i+1));
             }
         }
         
-        Logger::instance().info("[Stage2] Total modified tracks: " + std::to_string(modified_tracks.get_count()));
+        Logger::instance().info("[Enhance] Total modified tracks: " + std::to_string(modified_tracks.get_count()));
         
         if (modified_tracks.get_count() > 0) {
-            Logger::instance().info("[Stage2] Writing to fb2k metadata database: " + 
+            Logger::instance().info("[Enhance] Writing to fb2k metadata database: " + 
                                    std::to_string(modified_tracks.get_count()) + " tracks");
             batch_update_metadata(modified_tracks, modified_infos);
         }
         
         pfc::string8 msg;
-        msg << "Stage 2 enhancement complete: " << applied << "/" << m_results.size() << " tracks updated";
-        popup_message::g_show(msg, "AI Metadata V8");
+        msg << "Enhancement complete: " << applied << "/" << m_results.size() << " tracks updated";
+        Feedback::success(msg.c_str());
+
+        int64_t elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - m_start_time).count();
+        CompletionStats stats;
+        stats.total_tracks = static_cast<int>(m_results.size());
+        stats.success_count = applied;
+        stats.failed_count = static_cast<int>(m_results.size()) - applied;
+        stats.elapsed_ms = elapsed_ms;
+        // 累计 tokens / cache_hits / api_calls（Enhance 真实统计）
+        for (const auto& r : m_results) {
+            if (r.cache_hit) {
+                stats.cache_hits++;
+            } else if (r.success) {
+                stats.api_calls++;
+            }
+            stats.tokens_used += r.tokens_used;
+            // 收集失败音轨详情
+            if (!r.success && !r.error.empty()) {
+                stats.failed_details.push_back(r.track_id + ": " + r.error);
+            }
+        }
+        if (stats.failed_count > 0) {
+            stats.details_label = std::to_string(stats.failed_count) +
+                " track(s) failed and will retry on next run.";
+        }
+        stats.caption = "Enhancement Complete";
+        CompletionDialog::Show(core_api::get_main_window(), stats);
     }
-    
+
 private:
     metadb_handle_list m_tracks;
     std::vector<TrackInput> m_inputs;
     EnhancementOptions m_options;
     std::vector<EnhancementResult> m_results;
     std::string m_error_message;
+    std::chrono::steady_clock::time_point m_start_time;
 };
 
-// 实现 chain 模式：启动 Stage2 增强流程
-static void launch_stage2_enhance_auto(metadb_handle_list tracks,
+// 实现 chain 模式：启动 Enhance 增强流程
+static void launch_enhance_auto(metadb_handle_list tracks,
                                         std::vector<TrackInput> inputs,
                                         EnhancementOptions options) {
-    service_ptr_t<Stage2EnhanceCallback> cb = new service_impl_t<Stage2EnhanceCallback>(
+    service_ptr_t<EnhanceCallback> cb = new service_impl_t<EnhanceCallback>(
         tracks, std::move(inputs), options);
     threaded_process::g_run_modeless(cb,
         threaded_process::flag_show_progress | threaded_process::flag_show_abort,
@@ -814,9 +895,9 @@ bool are_workers_healthy() {
 
 static const GUID guid_ai_metadata = 
     { 0x11111111, 0x2222, 0x3333, { 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb } };
-static const GUID guid_stage1_scrape = 
+static const GUID guid_scrape = 
     { 0x6f708192, 0x34a5, 0x6789, { 0x4a, 0x5b, 0x6c, 0x7d, 0x8e, 0x9f, 0xa0, 0xb1 } };
-static const GUID guid_stage2_enhance =
+static const GUID guid_enhance =
     { 0x70819234, 0xa567, 0x89ab, { 0x5b, 0x6c, 0x7d, 0x8e, 0x9f, 0xa0, 0xb1, 0xc2 } };
 static const GUID guid_scrape_and_enhance =
     { 0x81923456, 0x6789, 0xabcd, { 0x6c, 0x7d, 0x8e, 0x9f, 0xa0, 0xb1, 0xc2, 0xd3 } };
@@ -828,6 +909,9 @@ static const GUID guid_clear_cache =
     { 0xa3456789, 0x2345, 0x6789, { 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89 } };
 static const GUID guid_normalize =
     { 0xc456789a, 0xbcd0, 0x1234, { 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0, 0x12, 0x34 } };
+// Maintenance 子菜单 GUID（popup，不执行动作）
+static const GUID guid_maintenance_popup =
+    { 0xd56789ab, 0xcd01, 0x2345, { 0x67, 0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45 } };
 
 class V8MenuHandler : public contextmenu_item_v2 {
 public:
@@ -843,8 +927,8 @@ public:
     contextmenu_item_node_root* instantiate_item(unsigned p_index, metadb_handle_list_cref p_data, const GUID& p_caller) override;
     void item_execute_simple(unsigned p_index, const GUID& p_node, metadb_handle_list_cref p_data, const GUID& p_caller) override {}
     
-    void stage1_scrape(metadb_handle_list_cref p_data);
-    void stage2_enhance(metadb_handle_list_cref p_data);
+    void scrape(metadb_handle_list_cref p_data);
+    void enhance(metadb_handle_list_cref p_data);
     void scrape_and_enhance(metadb_handle_list_cref p_data);
     void normalize_metadata(metadb_handle_list_cref p_data);
     void rollback_to_initial(metadb_handle_list_cref p_data);
@@ -882,7 +966,7 @@ private:
     
     class MenuNodeCommand : public contextmenu_item_node_leaf {
     public:
-        MenuNodeCommand(const char* name, const GUID& guid, const char* desc, 
+        MenuNodeCommand(const char* name, const GUID& guid, const char* desc,
                         std::function<void(metadb_handle_list_cref)> func, bool enabled = true)
             : m_name(name), m_guid(guid), m_desc(desc), m_func(func), m_enabled(enabled) {}
         virtual ~MenuNodeCommand() {}
@@ -910,6 +994,45 @@ private:
         std::function<void(metadb_handle_list_cref)> m_func;
         bool m_enabled;
     };
+
+    /**
+     * @brief 子菜单（popup）节点
+     *
+     * 用于组织一组相关命令（如 Maintenance 子菜单）。
+     * 子菜单本身不执行动作，只展开子项。
+     */
+    class MenuNodePopup : public contextmenu_item_node {
+    public:
+        MenuNodePopup(const char* name, const GUID& guid, const char* desc = nullptr)
+            : m_name(name), m_guid(guid), m_desc(desc) {}
+        virtual ~MenuNodePopup() {}
+
+        bool get_display_data(pfc::string_base& p_out, unsigned& p_displayflags,
+                              metadb_handle_list_cref p_data, const GUID& p_caller) override {
+            (void)p_data; (void)p_caller;
+            p_out = m_name;
+            p_displayflags = 0;
+            return true;
+        }
+        t_type get_type() override { return TYPE_POPUP; }
+        void execute(metadb_handle_list_cref p_data, const GUID& p_caller) override {}
+        bool get_description(pfc::string_base& p_out) override {
+            if (m_desc && strlen(m_desc) > 0) { p_out = m_desc; return true; }
+            return false;
+        }
+        GUID get_guid() override { return m_guid; }
+        bool is_mappable_shortcut() override { return false; }
+        t_size get_children_count() override { return m_children.size(); }
+        contextmenu_item_node* get_child(t_size p_index) override {
+            return p_index < m_children.size() ? m_children[p_index] : nullptr;
+        }
+        void add_child(contextmenu_item_node* child) { m_children.push_back(child); }
+    private:
+        const char* m_name;
+        const GUID m_guid;
+        const char* m_desc;
+        std::vector<contextmenu_item_node*> m_children;
+    };
     
     class MenuNodeSeparator : public contextmenu_item_node_separator {
     public:
@@ -922,20 +1045,20 @@ contextmenu_item_node_root* V8MenuHandler::instantiate_item(unsigned p_index, me
     auto root = new MenuNodeRoot();
     bool has_selection = p_data.get_count() > 0;
 
-    // 主操作组：刮削 + 增强
-    root->add_child(new MenuNodeCommand("Scrape Metadata", guid_stage1_scrape,
+    // ===== 主操作组：刮削 + 增强（3 项） =====
+    root->add_child(new MenuNodeCommand("Scrape Metadata", guid_scrape,
         "Scrape basic metadata (title, artist, album, year, etc.) from MusicBrainz, Discogs, and AI sources.",
-        [this](metadb_handle_list_cref data) { stage1_scrape(data); }, has_selection));
-    root->add_child(new MenuNodeCommand("Enhance Metadata", guid_stage2_enhance,
+        [this](metadb_handle_list_cref data) { scrape(data); }, has_selection));
+    root->add_child(new MenuNodeCommand("Enhance Metadata", guid_enhance,
         "Enhance metadata: translate title/album/artist to Chinese based on existing tags.",
-        [this](metadb_handle_list_cref data) { stage2_enhance(data); }, has_selection));
+        [this](metadb_handle_list_cref data) { enhance(data); }, has_selection));
     root->add_child(new MenuNodeCommand("Scrape & Enhance (Auto)", guid_scrape_and_enhance,
         "Run Scrape then Enhance automatically in one step. Skips intermediate confirmation dialogs.",
         [this](metadb_handle_list_cref data) { scrape_and_enhance(data); }, has_selection));
 
     root->add_child(new MenuNodeSeparator());
 
-    // Normalize 组
+    // ===== Normalize（保留原名，后续可扩展到其他字段） =====
     root->add_child(new MenuNodeCommand("Normalize...", guid_normalize,
         "Normalize metadata: unify different writings of the same entity (e.g. BEYOND vs Beyond). "
         "Opens a field selection dialog, then uses SQLite knowledge base + AI to suggest canonical names.",
@@ -943,33 +1066,43 @@ contextmenu_item_node_root* V8MenuHandler::instantiate_item(unsigned p_index, me
 
     root->add_child(new MenuNodeSeparator());
 
-    // 回滚组
-    root->add_child(new MenuNodeCommand("Rollback", guid_rollback_initial,
+    // ===== Rollback =====
+    root->add_child(new MenuNodeCommand("Rollback...", guid_rollback_initial,
         "Rollback selected operations: choose which to undo (scrape / enhance / normalize).",
         [this](metadb_handle_list_cref data) { rollback_to_initial(data); }, has_selection));
 
     root->add_child(new MenuNodeSeparator());
 
-    // 工具组
-    root->add_child(new MenuNodeCommand("Cache Statistics", guid_cache_stats,
+    // ===== Maintenance 子菜单（维护类操作归组） =====
+    MenuNodePopup* maintenance = new MenuNodePopup(
+        "Maintenance", guid_maintenance_popup,
+        "Cache management and diagnostic tools.");
+    maintenance->add_child(new MenuNodeCommand("Cache Statistics", guid_cache_stats,
         "Show cache statistics: total entries, hit rate, database size, API calls saved.",
         [this](metadb_handle_list_cref data) { (void)data; show_cache_stats(); }, true));
-    root->add_child(new MenuNodeCommand("Clear Cache", guid_clear_cache,
+    maintenance->add_child(new MenuNodeCommand("Clear Cache...", guid_clear_cache,
         "Clear cached metadata for selected tracks or the entire cache.",
         [this](metadb_handle_list_cref data) { clear_cache(data); }, true));
+    root->add_child(maintenance);
+
     return root;
 }
 
-void V8MenuHandler::stage1_scrape(metadb_handle_list_cref p_data) {
-    Logger::instance().info("[V8MenuHandler] stage1_scrape: CALLED, track count = " + std::to_string(p_data.get_count()));
-    console::print("AI Metadata V8: stage1_scrape called");
-    
+void V8MenuHandler::scrape(metadb_handle_list_cref p_data) {
+    Logger::instance().info("[V8MenuHandler] scrape: CALLED, track count = " + std::to_string(p_data.get_count()));
+    console::print("AI Metadata V8: scrape called");
+
     if (!ensure_ai_core_initialized()) {
-        Logger::instance().error("[V8MenuHandler] stage1_scrape: ensure_ai_core_initialized FAILED");
-        popup_message::g_show("Failed to initialize AI core", "AI Metadata V8");
+        Logger::instance().error("[V8MenuHandler] scrape: ensure_ai_core_initialized FAILED");
+        Feedback::error("Failed to initialize AI core.",
+                        "ensure_ai_core_initialized() returned false. Possible causes:\n"
+                        "- Python interpreter not found at configured path\n"
+                        "- Python worker failed to start (missing packages)\n"
+                        "- Cache database could not be opened",
+                        ErrorCategory::PythonWorker);
         return;
     }
-    Logger::instance().info("[V8MenuHandler] stage1_scrape: AI core initialized successfully");
+    Logger::instance().info("[V8MenuHandler] scrape: AI core initialized successfully");
     
     std::vector<MissingFieldInfo> missing;
     for (size_t i = 0; i < p_data.get_count(); ++i) {
@@ -1000,7 +1133,8 @@ void V8MenuHandler::stage1_scrape(metadb_handle_list_cref p_data) {
             msg << "\n";
         }
         if (missing.size() > 5) msg << "... and " << (missing.size() - 5) << " more";
-        popup_message::g_show(msg, "AI Metadata - Missing Fields");
+        // 缺少必填字段是数据问题，用 warn 而非 error
+        Feedback::warn(msg.c_str(), "AI Metadata - Missing Fields");
         return;
     }
     
@@ -1049,21 +1183,26 @@ void V8MenuHandler::stage1_scrape(metadb_handle_list_cref p_data) {
         }
     }
     
-    service_ptr_t<Stage1ScrapeCallback> callback = new service_impl_t<Stage1ScrapeCallback>(p_data, std::move(inputs), options);
+    service_ptr_t<ScrapeCallback> callback = new service_impl_t<ScrapeCallback>(p_data, std::move(inputs), options);
     threaded_process::g_run_modeless(callback, threaded_process::flag_show_progress | threaded_process::flag_show_abort,
-        core_api::get_main_window(), "Stage 1: Scrape Metadata");
+        core_api::get_main_window(), "Scrape Metadata");
 }
 
-void V8MenuHandler::stage2_enhance(metadb_handle_list_cref p_data) {
-    Logger::instance().info("[V8MenuHandler] stage2_enhance: CALLED, track count = " + std::to_string(p_data.get_count()));
-    console::print("AI Metadata V8: stage2_enhance called");
-    
+void V8MenuHandler::enhance(metadb_handle_list_cref p_data) {
+    Logger::instance().info("[V8MenuHandler] enhance: CALLED, track count = " + std::to_string(p_data.get_count()));
+    console::print("AI Metadata V8: enhance called");
+
     if (!ensure_ai_core_initialized()) {
-        Logger::instance().error("[V8MenuHandler] stage2_enhance: ensure_ai_core_initialized FAILED");
-        popup_message::g_show("Failed to initialize AI core", "AI Metadata V8");
+        Logger::instance().error("[V8MenuHandler] enhance: ensure_ai_core_initialized FAILED");
+        Feedback::error("Failed to initialize AI core.",
+                        "ensure_ai_core_initialized() returned false. Possible causes:\n"
+                        "- Python interpreter not found at configured path\n"
+                        "- Python worker failed to start (missing packages)\n"
+                        "- Cache database could not be opened",
+                        ErrorCategory::PythonWorker);
         return;
     }
-    Logger::instance().info("[V8MenuHandler] stage2_enhance: AI core initialized successfully");
+    Logger::instance().info("[V8MenuHandler] enhance: AI core initialized successfully");
     
     EnhancementOptions options;
     if (!DialogManager::ShowEnhancementOptionsDialog(core_api::get_main_window(), options)) return;
@@ -1094,9 +1233,9 @@ void V8MenuHandler::stage2_enhance(metadb_handle_list_cref p_data) {
         }
     }
     
-    service_ptr_t<Stage2EnhanceCallback> callback = new service_impl_t<Stage2EnhanceCallback>(p_data, std::move(inputs), options);
+    service_ptr_t<EnhanceCallback> callback = new service_impl_t<EnhanceCallback>(p_data, std::move(inputs), options);
     threaded_process::g_run_modeless(callback, threaded_process::flag_show_progress | threaded_process::flag_show_abort,
-        core_api::get_main_window(), "Stage 2: Enhance Metadata");
+        core_api::get_main_window(), "Enhance Metadata");
 }
 
 void V8MenuHandler::scrape_and_enhance(metadb_handle_list_cref p_data) {
@@ -1105,11 +1244,16 @@ void V8MenuHandler::scrape_and_enhance(metadb_handle_list_cref p_data) {
 
     if (!ensure_ai_core_initialized()) {
         Logger::instance().error("[V8MenuHandler] scrape_and_enhance: ensure_ai_core_initialized FAILED");
-        popup_message::g_show("Failed to initialize AI core", "AI Metadata V8");
+        Feedback::error("Failed to initialize AI core.",
+                        "ensure_ai_core_initialized() returned false. Possible causes:\n"
+                        "- Python interpreter not found at configured path\n"
+                        "- Python worker failed to start (missing packages)\n"
+                        "- Cache database could not be opened",
+                        ErrorCategory::PythonWorker);
         return;
     }
 
-    // 检查必填字段（同 stage1_scrape）
+    // 检查必填字段（同 scrape）
     std::vector<MissingFieldInfo> missing;
     for (size_t i = 0; i < p_data.get_count(); ++i) {
         file_info_impl info;
@@ -1138,7 +1282,8 @@ void V8MenuHandler::scrape_and_enhance(metadb_handle_list_cref p_data) {
             msg << "\n";
         }
         if (missing.size() > 5) msg << "... and " << (missing.size() - 5) << " more";
-        popup_message::g_show(msg, "AI Metadata - Missing Fields");
+        // 缺少必填字段是数据问题，用 warn 而非 error
+        Feedback::warn(msg.c_str(), "AI Metadata - Missing Fields");
         return;
     }
 
@@ -1150,10 +1295,10 @@ void V8MenuHandler::scrape_and_enhance(metadb_handle_list_cref p_data) {
     if (!DialogManager::ShowScrapingOptionsDialog(core_api::get_main_window(), options)) return;
 
     // 增强选项对话框（让用户选择翻译等）
-    EnhancementOptions stage2_options;
-    if (!DialogManager::ShowEnhancementOptionsDialog(core_api::get_main_window(), stage2_options)) return;
+    EnhancementOptions enhance_options;
+    if (!DialogManager::ShowEnhancementOptionsDialog(core_api::get_main_window(), enhance_options)) return;
 
-    // 构建 stage1 输入
+    // 构建 scrape 输入
     std::vector<TrackInput> inputs;
     for (size_t i = 0; i < p_data.get_count(); ++i) {
         file_info_impl info;
@@ -1193,11 +1338,11 @@ void V8MenuHandler::scrape_and_enhance(metadb_handle_list_cref p_data) {
         }
     }
 
-    // 启动 stage1，chain_to_stage2=true，自动触发 stage2
-    service_ptr_t<Stage1ScrapeCallback> callback = new service_impl_t<Stage1ScrapeCallback>(
-        p_data, std::move(inputs), options, true, stage2_options);
+    // 启动 scrape，chain_to_enhance=true，自动触发 enhance
+    service_ptr_t<ScrapeCallback> callback = new service_impl_t<ScrapeCallback>(
+        p_data, std::move(inputs), options, true, enhance_options);
     threaded_process::g_run_modeless(callback, threaded_process::flag_show_progress | threaded_process::flag_show_abort,
-        core_api::get_main_window(), "Scrape & Enhance (Auto) - Stage 1");
+        core_api::get_main_window(), "Scrape & Enhance (Auto)");
 }
 
 void V8MenuHandler::rollback_to_initial(metadb_handle_list_cref p_data) {
@@ -1205,11 +1350,13 @@ void V8MenuHandler::rollback_to_initial(metadb_handle_list_cref p_data) {
     Logger::instance().info("[Rollback] track count = " + std::to_string(p_data.get_count()));
 
     if (p_data.get_count() == 0) {
-        popup_message::g_show("No tracks selected", "AI Metadata V8");
+        Feedback::warn("No tracks selected.");
         return;
     }
     if (!ensure_ai_core_initialized()) {
-        popup_message::g_show("Failed to initialize AI core", "AI Metadata V8");
+        Feedback::error("Failed to initialize AI core.",
+                        "ensure_ai_core_initialized() returned false.",
+                        ErrorCategory::PythonWorker);
         return;
     }
 
@@ -1252,10 +1399,9 @@ void V8MenuHandler::rollback_to_initial(metadb_handle_list_cref p_data) {
     }
 
     if (available_set.empty()) {
-        Logger::instance().warning("[Rollback] No snapshots found - showing popup and returning");
-        popup_message::g_show("No rollback snapshots found for any selected track.\n"
-                              "Please run Scrape / Enhance / Normalize first to create snapshots.",
-                              "AI Metadata V8");
+        Logger::instance().warning("[Rollback] No snapshots found - showing feedback and returning");
+        Feedback::warn("No rollback snapshots found for any selected track.\n"
+                        "Please run Scrape / Enhance / Normalize first to create snapshots.");
         return;
     }
 
@@ -1283,15 +1429,17 @@ void V8MenuHandler::rollback_to_initial(metadb_handle_list_cref p_data) {
                                   std::to_string(RollbackTypeDialog::s_last_error_code) + ").\n"
                                   "This may indicate the dialog resource is missing or the DLL is outdated.\n"
                                   "Please rebuild the plugin or check logs/core.log for details.";
-            popup_message::g_show(err_msg.c_str(), "AI Metadata V8 - Dialog Error");
+            Feedback::error("Failed to open rollback dialog.",
+                            err_msg,
+                            ErrorCategory::Unknown);
         } else {
-            popup_message::g_show("Rollback cancelled", "AI Metadata V8");
+            Feedback::info("Rollback cancelled by user");
         }
         return;
     }
 
     if (selected_types.empty()) {
-        popup_message::g_show("No rollback type selected.", "AI Metadata V8");
+        Feedback::warn("No rollback type selected.");
         return;
     }
 
@@ -1365,7 +1513,12 @@ void V8MenuHandler::rollback_to_initial(metadb_handle_list_cref p_data) {
     oss << "\n\nRolled back: " << success_count
         << "\nNo snapshot found: " << no_backup_count
         << "\nFailed: " << fail_count;
-    popup_message::g_show(oss.str().c_str(), "Rollback");
+    // 回滚是重要操作，结果用 success 级别（仅 console）+ 失败时单独提示
+    if (fail_count > 0) {
+        Feedback::warn(oss.str(), "Rollback");
+    } else {
+        Feedback::success(oss.str());
+    }
 }
 
 void V8MenuHandler::show_cache_stats() {
@@ -1374,16 +1527,19 @@ void V8MenuHandler::show_cache_stats() {
     
     if (!ensure_ai_core_initialized()) {
         Logger::instance().error("[V8MenuHandler] show_cache_stats: AI core not initialized");
-        popup_message::g_show("AI Core not initialized", "AI Metadata V8");
+        Feedback::error("AI Core not initialized.",
+                        "ensure_ai_core_initialized() returned false.",
+                        ErrorCategory::PythonWorker);
         return;
     }
-    
+
     auto stats = g_ai_core->get_cache_statistics();
     pfc::string8 msg;
     msg << "Cache Statistics:\n\nTotal Entries: " << stats.total_entries << "\nCache Hits: " << stats.total_hits
-        << "\nCache Misses: " << stats.total_misses << "\nHit Rate: " << stats.hit_rate 
+        << "\nCache Misses: " << stats.total_misses << "\nHit Rate: " << stats.hit_rate
         << "%\nDatabase Size: " << stats.db_size_mb << " MB\nAPI Calls Saved: " << stats.api_calls_saved;
-    popup_message::g_show(msg, "Cache Statistics");
+    popup_message::g_show(msg.c_str(), "Cache Statistics");
+    LOG_INFO("[V8MenuHandler] show_cache_stats: " + std::string(msg.c_str()));
 }
 
 struct ClearCacheDialogParams {
@@ -1426,7 +1582,9 @@ void V8MenuHandler::clear_cache(metadb_handle_list_cref p_data) {
     
     if (!ensure_ai_core_initialized()) {
         Logger::instance().error("[V8MenuHandler] clear_cache: AI core not initialized");
-        popup_message::g_show("AI Core not initialized", "AI Metadata V8");
+        Feedback::error("AI Core not initialized.",
+                        "ensure_ai_core_initialized() returned false.",
+                        ErrorCategory::PythonWorker);
         return;
     }
     
@@ -1450,7 +1608,8 @@ void V8MenuHandler::clear_cache(metadb_handle_list_cref p_data) {
     if (params.clear_all) {
         Logger::instance().info("[V8MenuHandler] clear_cache: Clearing ALL cache");
         g_ai_core->clear_cache();
-        popup_message::g_show("All cache cleared successfully", "AI Metadata V8");
+        // 清缓存是用户主动操作，结果用 console 即可
+        Feedback::success("All cache cleared successfully");
     } else {
         std::vector<std::string> track_ids;
         for (size_t i = 0; i < p_data.get_count(); ++i) {
@@ -1467,7 +1626,7 @@ void V8MenuHandler::clear_cache(metadb_handle_list_cref p_data) {
         }
         
         if (track_ids.empty()) {
-            popup_message::g_show("No tracks selected", "AI Metadata V8");
+            Feedback::warn("No tracks selected.");
             return;
         }
         
@@ -1476,7 +1635,7 @@ void V8MenuHandler::clear_cache(metadb_handle_list_cref p_data) {
         
         std::ostringstream oss;
         oss << "Cleared " << deleted << " cache entries for " << track_ids.size() << " track(s)";
-        popup_message::g_show(oss.str().c_str(), "AI Metadata V8");
+        Feedback::success(oss.str());
     }
 }
 
@@ -1516,6 +1675,7 @@ public:
 
     void on_init(HWND p_wnd) override {
         console::print("AI Metadata V8: Normalize started...");
+        m_start_time = std::chrono::steady_clock::now();
     }
 
     void run(threaded_process_status& p_status, abort_callback& p_abort) override {
@@ -1550,17 +1710,19 @@ public:
 
     void on_done(HWND p_wnd, bool p_was_aborted) override {
         if (p_was_aborted) {
-            popup_message::g_show("Normalize cancelled by user", "AI Metadata V8");
+            Feedback::info("Normalize cancelled by user");
             return;
         }
 
         if (!m_error_message.empty()) {
-            popup_message::g_show(m_error_message.c_str(), "AI Metadata V8");
+            Feedback::error(m_error_message,
+                            "Normalize pipeline reported an error. See log for AI/Python details.",
+                            ErrorCategory::AiInference);
             return;
         }
 
         if (m_result.groups.empty() && m_result.uncertain.empty()) {
-            popup_message::g_show("No normalization suggestions returned.", "AI Metadata V8");
+            Feedback::warn("No normalization suggestions returned.");
             return;
         }
 
@@ -1571,9 +1733,11 @@ public:
                 m_options.field,
                 m_result,
                 selected_groups)) {
-            popup_message::g_show("Normalize cancelled by user", "AI Metadata V8");
+            Feedback::info("Normalize cancelled by user");
             return;
         }
+
+        Logger::instance().info("[NormalizeApply] Dialog closed, confirmed. Building alias_to_canonical map...");
 
         // 构建用户选中 groups 的 alias → canonical 映射。
         // 用户可能在 UI 把 uncertain 的 alias 手动加入 group，所以必须基于
@@ -1624,14 +1788,18 @@ public:
         }
 
         if (selected_canonicals.empty()) {
-            popup_message::g_show("No groups selected. Nothing to apply.", "AI Metadata V8");
+            Feedback::warn("No groups selected. Nothing to apply.");
             return;
         }
 
         // 通过 IPC 通知 Python worker 写入 normalize_alias 表（Python 端管理）
         // Python 端会自动用 _normalize_key(alias_name) 计算 alias_key 并写入
         if (!aliases_to_save.empty()) {
+            Logger::instance().info("[NormalizeApply] Calling save_normalize_aliases, count=" +
+                                    std::to_string(aliases_to_save.size()));
             bool ok = g_ai_core->save_normalize_aliases(m_options.field, aliases_to_save);
+            Logger::instance().info("[NormalizeApply] save_normalize_aliases returned " +
+                                    std::string(ok ? "true" : "false"));
             if (!ok) {
                 console::print("AI Metadata V8: Warning - save_normalize_aliases failed, "
                                "tag writes will continue but aliases not persisted");
@@ -1740,15 +1908,36 @@ public:
         }
 
         if (applied > 0) {
+            Logger::instance().info("[NormalizeApply] Calling batch_update_metadata, applied=" + std::to_string(applied));
             batch_update_metadata(modified_tracks, modified_infos);
+            Logger::instance().info("[NormalizeApply] batch_update_metadata done");
             std::ostringstream oss;
             oss << "Normalize complete: " << applied << " track(s) updated for field '" << m_options.field << "'.";
-            console::print(oss.str().c_str());
-            popup_message::g_show(oss.str().c_str(), "AI Metadata V8");
+            Feedback::success(oss.str());
         } else {
-            popup_message::g_show("No tracks needed normalization (all values already canonical or no matching alias).",
-                                  "AI Metadata V8");
+            Feedback::info("No tracks needed normalization (all values already canonical or no matching alias).");
         }
+
+        int64_t elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - m_start_time).count();
+        CompletionStats stats;
+        stats.total_tracks = static_cast<int>(m_tracks.get_count());
+        stats.success_count = applied;
+        // Normalize 没有"失败"概念：未被 applied 的 track 是"无需修改"（已是 canonical
+        // 或不在选中 alias 集合内），不算 failed。失败仅在 normalize_sync 返回 nullopt
+        // 或 m_error_message 非空时（这些情况已提前 return）。
+        stats.failed_count = 0;
+        int skipped = stats.total_tracks - applied;
+        if (skipped > 0) {
+            stats.details_label = std::to_string(skipped) +
+                " track(s) skipped (already canonical or no matching alias).";
+        }
+        stats.cache_hits = m_result.cache_hits;
+        stats.api_calls = m_result.api_calls;
+        stats.tokens_used = m_result.tokens_used;
+        stats.elapsed_ms = elapsed_ms;
+        stats.caption = "Normalize Complete";
+        CompletionDialog::Show(core_api::get_main_window(), stats);
     }
 
 private:
@@ -1759,6 +1948,7 @@ private:
     std::vector<std::vector<std::string>> m_track_field_values;  ///< 每个 track 当前 field 的所有 values
     NormalizeResult m_result;
     std::string m_error_message;
+    std::chrono::steady_clock::time_point m_start_time;
 };
 
 void V8MenuHandler::normalize_metadata(metadb_handle_list_cref p_data) {
@@ -1768,12 +1958,14 @@ void V8MenuHandler::normalize_metadata(metadb_handle_list_cref p_data) {
 
     if (!ensure_ai_core_initialized()) {
         Logger::instance().error("[V8MenuHandler] normalize_metadata: ensure_ai_core_initialized FAILED");
-        popup_message::g_show("Failed to initialize AI core", "AI Metadata V8");
+        Feedback::error("Failed to initialize AI core.",
+                        "ensure_ai_core_initialized() returned false.",
+                        ErrorCategory::PythonWorker);
         return;
     }
 
     if (p_data.get_count() == 0) {
-        popup_message::g_show("No tracks selected.", "AI Metadata V8");
+        Feedback::warn("No tracks selected.");
         return;
     }
 
@@ -1784,7 +1976,7 @@ void V8MenuHandler::normalize_metadata(metadb_handle_list_cref p_data) {
         return;
     }
     if (selected_fields.empty()) {
-        popup_message::g_show("No fields selected.", "AI Metadata V8");
+        Feedback::warn("No fields selected.");
         return;
     }
 
@@ -1813,7 +2005,12 @@ void V8MenuHandler::normalize_metadata(metadb_handle_list_cref p_data) {
     }
 
     if (inputs.empty()) {
-        popup_message::g_show("Failed to read track metadata.", "AI Metadata V8");
+        Feedback::error("Failed to read track metadata.",
+                        "No TrackInput could be extracted from the selected tracks.\n"
+                        "Possible causes:\n"
+                        "- Tracks are not loaded / inaccessible\n"
+                        "- File system permissions",
+                        ErrorCategory::FileSystem);
         return;
     }
 

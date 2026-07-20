@@ -123,7 +123,7 @@ std::string CacheLayer::generate_cache_key(const TrackInput& input) {
     return input.track_id;
 }
 
-std::string CacheLayer::generate_stage2_cache_key(const TrackInput& input, const EnhancementOptions& options) {
+std::string CacheLayer::generate_enhance_cache_key(const TrackInput& input, const EnhancementOptions& options) {
     (void)options;
     return input.track_id;
 }
@@ -286,8 +286,8 @@ void CacheLayer::create_indexes() {
 
 // =====================================================================
 // migrate_legacy_tables：旧表名 → 新表名一次性迁移（幂等）
-//   stage1_cache        → scrape_cache
-//   stage2_cache        → enhance_cache
+//   scrape_cache        → scrape_cache
+//   enhance_cache        → enhance_cache
 //   metadata_snapshots  → rollback_snapshot（由 BackupManager 管理，此处不处理）
 //   normalize_alias     → 由 Python 端管理（迁移后由 Python 删除旧表）
 // 迁移策略：检测到旧表存在且新表不存在时，RENAME TABLE；
@@ -318,16 +318,16 @@ void CacheLayer::migrate_legacy_tables() {
         }
     };
 
-    // stage1_cache → scrape_cache
+    // scrape_cache → scrape_cache
     if (table_exists("stage1_cache") && !table_exists("scrape_cache")) {
-        LOG_INFO("migrate_legacy_tables: Renaming stage1_cache → scrape_cache");
+        LOG_INFO("migrate_legacy_tables: Renaming scrape_cache → scrape_cache");
         exec("DROP INDEX IF EXISTS idx_stage1_cache_key");
         exec("ALTER TABLE stage1_cache RENAME TO scrape_cache");
     }
 
-    // stage2_cache → enhance_cache
+    // enhance_cache → enhance_cache
     if (table_exists("stage2_cache") && !table_exists("enhance_cache")) {
-        LOG_INFO("migrate_legacy_tables: Renaming stage2_cache → enhance_cache");
+        LOG_INFO("migrate_legacy_tables: Renaming enhance_cache → enhance_cache");
         exec("DROP INDEX IF EXISTS idx_stage2_cache_key");
         exec("ALTER TABLE stage2_cache RENAME TO enhance_cache");
     }
@@ -370,13 +370,63 @@ bool CacheLayer::check_integrity() {
 
 void CacheLayer::clear_all() {
     std::lock_guard<std::mutex> lock(mutex_);
-    
-    if (!db_) return;
-    
-    sqlite3_exec(db_, "DELETE FROM scrape_cache", nullptr, nullptr, nullptr);
-    sqlite3_exec(db_, "DELETE FROM enhance_cache", nullptr, nullptr, nullptr);
-    sqlite3_exec(db_, "DELETE FROM cache_statistics", nullptr, nullptr, nullptr);
-    // 注意：normalize_alias 已迁移到 Python 端管理，C++ 端不再清空
+
+    if (!db_) {
+        LOG_ERROR("CacheLayer::clear_all: db_ is null, cannot clear");
+        return;
+    }
+
+    char* err_msg = nullptr;
+    int rc;
+
+    rc = sqlite3_exec(db_, "DELETE FROM scrape_cache", nullptr, nullptr, &err_msg);
+    if (rc != SQLITE_OK) {
+        LOG_ERROR("CacheLayer::clear_all: DELETE scrape_cache failed: " +
+                  std::string(err_msg ? err_msg : "unknown"));
+        if (err_msg) sqlite3_free(err_msg);
+        err_msg = nullptr;
+    }
+
+    rc = sqlite3_exec(db_, "DELETE FROM enhance_cache", nullptr, nullptr, &err_msg);
+    if (rc != SQLITE_OK) {
+        LOG_ERROR("CacheLayer::clear_all: DELETE enhance_cache failed: " +
+                  std::string(err_msg ? err_msg : "unknown"));
+        if (err_msg) sqlite3_free(err_msg);
+        err_msg = nullptr;
+    }
+
+    rc = sqlite3_exec(db_, "DELETE FROM cache_statistics", nullptr, nullptr, &err_msg);
+    if (rc != SQLITE_OK) {
+        LOG_ERROR("CacheLayer::clear_all: DELETE cache_statistics failed: " +
+                  std::string(err_msg ? err_msg : "unknown"));
+        if (err_msg) sqlite3_free(err_msg);
+        err_msg = nullptr;
+    }
+
+    // normalize_alias 表由 Python 端管理，但表在同一个 SQLite db 文件中。
+    // C++ 端也可以直接 DELETE（表存在时）。这样用户点 Clear Cache 能彻底清空所有缓存。
+    {
+        sqlite3_stmt* chk_stmt = nullptr;
+        const char* chk_sql = "SELECT name FROM sqlite_master WHERE type='table' AND name='normalize_alias'";
+        bool normalize_alias_exists = false;
+        if (sqlite3_prepare_v2(db_, chk_sql, -1, &chk_stmt, nullptr) == SQLITE_OK) {
+            if (sqlite3_step(chk_stmt) == SQLITE_ROW) normalize_alias_exists = true;
+            sqlite3_finalize(chk_stmt);
+        }
+        if (normalize_alias_exists) {
+            rc = sqlite3_exec(db_, "DELETE FROM normalize_alias", nullptr, nullptr, &err_msg);
+            if (rc != SQLITE_OK) {
+                LOG_ERROR("CacheLayer::clear_all: DELETE normalize_alias failed: " +
+                          std::string(err_msg ? err_msg : "unknown"));
+                if (err_msg) sqlite3_free(err_msg);
+                err_msg = nullptr;
+            } else {
+                LOG_INFO("CacheLayer::clear_all: normalize_alias cleared");
+            }
+        }
+    }
+
+    LOG_INFO("CacheLayer::clear_all: all cache tables cleared");
 }
 
 int CacheLayer::clear_by_track_ids(const std::vector<std::string>& track_ids) {
@@ -394,7 +444,7 @@ int CacheLayer::clear_by_track_ids(const std::vector<std::string>& track_ids) {
         placeholders += "?";
     }
     
-    std::string sql1 = "DELETE FROM stage1_cache WHERE track_id IN (" + placeholders + ")";
+    std::string sql1 = "DELETE FROM scrape_cache WHERE track_id IN (" + placeholders + ")";
     sqlite3_stmt* stmt1 = nullptr;
     if (sqlite3_prepare_v2(db_, sql1.c_str(), -1, &stmt1, nullptr) == SQLITE_OK) {
         for (size_t i = 0; i < track_ids.size(); ++i) {
@@ -423,10 +473,15 @@ int CacheLayer::clear_by_track_ids(const std::vector<std::string>& track_ids) {
 
 CacheStatistics CacheLayer::get_statistics() {
     std::lock_guard<std::mutex> lock(mutex_);
-    
+
+    LOG_INFO("get_statistics: called");
+
     CacheStatistics stats;
-    
-    if (!db_) return stats;
+
+    if (!db_) {
+        LOG_ERROR("get_statistics: db_ is null");
+        return stats;
+    }
     
     const char* sql = R"(
         SELECT
@@ -562,7 +617,7 @@ int CacheLayer::get_database_size_mb() {
     return size_mb;
 }
 
-std::optional<Stage1CacheEntry> CacheLayer::get_stage1(const std::string& cache_key) {
+std::optional<ScrapeCacheEntry> CacheLayer::get_scrape(const std::string& cache_key) {
     std::lock_guard<std::mutex> lock(mutex_);
     
     if (!db_) return std::nullopt;
@@ -572,13 +627,16 @@ std::optional<Stage1CacheEntry> CacheLayer::get_stage1(const std::string& cache_
     sqlite3_stmt* stmt = nullptr;
     
     if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        LOG_ERROR("get_scrape: prepare SELECT failed: " + std::string(sqlite3_errmsg(db_)) +
+                 ", cache_key=" + cache_key.substr(0, 16) + "...");
         return std::nullopt;
     }
-    
+
     sqlite3_bind_text(stmt, 1, cache_key.c_str(), -1, SQLITE_TRANSIENT);
-    
-    if (sqlite3_step(stmt) == SQLITE_ROW) {
-        Stage1CacheEntry entry;
+
+    int step_rc = sqlite3_step(stmt);
+    if (step_rc == SQLITE_ROW) {
+        ScrapeCacheEntry entry;
         entry.track_id = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
         if (sqlite3_column_type(stmt, 1) != SQLITE_NULL) {
             entry.file_path = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
@@ -619,23 +677,36 @@ std::optional<Stage1CacheEntry> CacheLayer::get_stage1(const std::string& cache_
         }
         
         sqlite3_finalize(stmt);
-        
+
         const char* update_sql = "UPDATE scrape_cache SET cache_hit_count = cache_hit_count + 1, last_accessed_at = datetime('now') WHERE cache_key = ?";
         sqlite3_stmt* update_stmt = nullptr;
         if (sqlite3_prepare_v2(db_, update_sql, -1, &update_stmt, nullptr) == SQLITE_OK) {
             sqlite3_bind_text(update_stmt, 1, cache_key.c_str(), -1, SQLITE_TRANSIENT);
-            sqlite3_step(update_stmt);
+            int rc = sqlite3_step(update_stmt);
+            if (rc != SQLITE_DONE) {
+                LOG_ERROR("get_scrape: UPDATE cache_hit_count failed, rc=" + std::to_string(rc) +
+                         ", err=" + std::string(sqlite3_errmsg(db_)) +
+                         ", cache_key=" + cache_key.substr(0, 16) + "...");
+            } else {
+                int changed = sqlite3_changes(db_);
+                LOG_INFO("get_scrape: cache hit, updated cache_hit_count, rows_changed=" + std::to_string(changed) +
+                        ", cache_key=" + cache_key.substr(0, 16) + "...");
+            }
             sqlite3_finalize(update_stmt);
+        } else {
+            LOG_ERROR("get_scrape: prepare UPDATE failed: " + std::string(sqlite3_errmsg(db_)));
         }
-        
+
         return entry;
     }
-    
+
     sqlite3_finalize(stmt);
+    LOG_INFO("get_scrape: cache miss, step_rc=" + std::to_string(step_rc) +
+             ", cache_key=" + cache_key.substr(0, 16) + "...");
     return std::nullopt;
 }
 
-void CacheLayer::set_stage1(const std::string& cache_key, const Stage1CacheEntry& entry) {
+void CacheLayer::set_scrape(const std::string& cache_key, const ScrapeCacheEntry& entry) {
     std::lock_guard<std::mutex> lock(mutex_);
     
     if (!db_) return;
@@ -684,11 +755,15 @@ void CacheLayer::set_stage1(const std::string& cache_key, const Stage1CacheEntry
     
     char* err_msg = nullptr;
     if (sqlite3_exec(db_, sql.c_str(), nullptr, nullptr, &err_msg) != SQLITE_OK) {
+        LOG_ERROR("set_scrape: SQL failed: " + std::string(err_msg ? err_msg : "unknown"));
+        LOG_ERROR("set_scrape: SQL was: " + sql);
         if (err_msg) sqlite3_free(err_msg);
+    } else {
+        LOG_INFO("set_scrape: saved cache_key=" + cache_key.substr(0, 16) + "..., track_id=" + entry.track_id.substr(0, 16) + "...");
     }
 }
 
-std::optional<Stage2CacheEntry> CacheLayer::get_stage2(const std::string& cache_key) {
+std::optional<EnhanceCacheEntry> CacheLayer::get_enhance(const std::string& cache_key) {
     std::lock_guard<std::mutex> lock(mutex_);
     
     if (!db_) return std::nullopt;
@@ -705,7 +780,7 @@ std::optional<Stage2CacheEntry> CacheLayer::get_stage2(const std::string& cache_
     sqlite3_bind_text(stmt, 1, cache_key.c_str(), -1, SQLITE_TRANSIENT);
 
     if (sqlite3_step(stmt) == SQLITE_ROW) {
-        Stage2CacheEntry entry;
+        EnhanceCacheEntry entry;
         entry.track_id = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
         if (sqlite3_column_type(stmt, 1) != SQLITE_NULL) {
             entry.file_path = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
@@ -743,7 +818,7 @@ std::optional<Stage2CacheEntry> CacheLayer::get_stage2(const std::string& cache_
     return std::nullopt;
 }
 
-void CacheLayer::set_stage2(const std::string& cache_key, const Stage2CacheEntry& entry) {
+void CacheLayer::set_enhance(const std::string& cache_key, const EnhanceCacheEntry& entry) {
     std::lock_guard<std::mutex> lock(mutex_);
     
     if (!db_) return;

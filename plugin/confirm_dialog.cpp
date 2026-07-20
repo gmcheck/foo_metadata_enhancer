@@ -8,6 +8,7 @@
 #include <sstream>
 #include <iomanip>
 #include <vector>
+#include <algorithm>
 
 namespace ai_metadata {
 
@@ -113,6 +114,9 @@ ScrapingOptions* ScrapingOptionsDialog::s_options = nullptr;
 EnhancementOptions* EnhancementOptionsDialog::s_options = nullptr;
 std::vector<TrackScrapingResult>* ConfirmResultDialog::s_results = nullptr;
 std::vector<bool>* ConfirmResultDialog::s_selected = nullptr;
+std::vector<int> ConfirmResultDialog::s_view_indices;
+bool ConfirmResultDialog::s_sort_descending = false;
+int ConfirmResultDialog::s_sort_column = -1;
 const std::vector<TrackInput>* ConfirmResultDialog::s_original_inputs = nullptr;
 bool ConfirmResultDialog::s_confirmed = false;
 std::map<std::string, bool> ConfirmResultDialog::s_field_selection;
@@ -129,6 +133,7 @@ std::string NormalizeConfirmDialog::s_field;
 NormalizeResult* NormalizeConfirmDialog::s_result = nullptr;
 std::vector<bool>* NormalizeConfirmDialog::s_selected_groups = nullptr;
 bool NormalizeConfirmDialog::s_confirmed = false;
+bool NormalizeConfirmDialog::s_populating = false;
 
 std::string NormalizeEditDialog::s_canonical_name;
 std::vector<std::string> NormalizeEditDialog::s_aliases;
@@ -224,19 +229,9 @@ INT_PTR CALLBACK ScrapingOptionsDialog::DlgProc(HWND wnd, UINT msg, WPARAM wp, L
 }
 
 void ScrapingOptionsDialog::DoInitDialog(HWND wnd) {
-    if (!s_options) return;
-    
-    CheckDlgButton(wnd, IDC_ENABLE_MUSICBRAINZ, s_options->enable_musicbrainz ? BST_CHECKED : BST_UNCHECKED);
-    CheckDlgButton(wnd, IDC_ENABLE_DISCOGS, s_options->enable_discogs ? BST_CHECKED : BST_UNCHECKED);
-    CheckDlgButton(wnd, IDC_ENABLE_AI, s_options->enable_ai ? BST_CHECKED : BST_UNCHECKED);
-    
-    std::ostringstream oss;
-    oss << std::fixed << std::setprecision(2) << s_options->auto_accept_threshold;
-    SetDlgItemTextW(wnd, IDC_AUTO_ACCEPT_THRESHOLD, to_wstring(oss.str()).c_str());
-    
-    oss.str("");
-    oss << s_options->confirm_threshold;
-    SetDlgItemTextW(wnd, IDC_CONFIRM_THRESHOLD, to_wstring(oss.str()).c_str());
+    // Data Sources / Confidence Thresholds 已迁移至 Preferences 页面，弹窗无需初始化控件
+    (void)wnd;
+    (void)s_options;
 }
 
 void ScrapingOptionsDialog::OnOK(HWND wnd) {
@@ -249,18 +244,8 @@ void ScrapingOptionsDialog::OnCancel(HWND wnd) {
 }
 
 void ScrapingOptionsDialog::SaveOptions(HWND wnd) {
-    if (!s_options) return;
-    
-    s_options->enable_musicbrainz = IsDlgButtonChecked(wnd, IDC_ENABLE_MUSICBRAINZ) == BST_CHECKED;
-    s_options->enable_discogs = IsDlgButtonChecked(wnd, IDC_ENABLE_DISCOGS) == BST_CHECKED;
-    s_options->enable_ai = IsDlgButtonChecked(wnd, IDC_ENABLE_AI) == BST_CHECKED;
-    
-    wchar_t buffer[32];
-    GetDlgItemTextW(wnd, IDC_AUTO_ACCEPT_THRESHOLD, buffer, sizeof(buffer)/sizeof(wchar_t));
-    s_options->auto_accept_threshold = static_cast<float>(_wtof(buffer));
-    
-    GetDlgItemTextW(wnd, IDC_CONFIRM_THRESHOLD, buffer, sizeof(buffer)/sizeof(wchar_t));
-    s_options->confirm_threshold = static_cast<float>(_wtof(buffer));
+    // 弹窗不再承载可编辑选项；options 由调用方从 SettingsManager 预填，保持原样返回
+    (void)wnd;
 }
 
 INT_PTR CALLBACK EnhancementOptionsDialog::DlgProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
@@ -333,6 +318,12 @@ INT_PTR CALLBACK ConfirmResultDialog::DlgProc(HWND wnd, UINT msg, WPARAM wp, LPA
                 case IDC_EDIT_ITEM:
                     OnEditItem(wnd);
                     return TRUE;
+                case IDC_FILTER_LOW_CONF:
+                    OnFilterLowConf(wnd);
+                    return TRUE;
+                case IDC_SORT_CONF:
+                    OnSortByConfidence(wnd);
+                    return TRUE;
             }
             break;
 
@@ -340,10 +331,27 @@ INT_PTR CALLBACK ConfirmResultDialog::DlgProc(HWND wnd, UINT msg, WPARAM wp, LPA
             {
                 LPNMHDR nmhdr = reinterpret_cast<LPNMHDR>(lp);
                 if (nmhdr->idFrom == IDC_RESULT_LISTVIEW) {
-                    if (nmhdr->code == NM_DBLCLK) {
-                        LPNMITEMACTIVATE lpnmitem = reinterpret_cast<LPNMITEMACTIVATE>(lp);
-                        OnEditItemAt(wnd, lpnmitem->iItem, lpnmitem->iSubItem);
-                        return TRUE;
+                    switch (nmhdr->code) {
+                        case LVN_GETDISPINFO:
+                            OnGetDispInfo(lp);
+                            return TRUE;
+                        case LVN_ITEMCHANGED:
+                            OnItemChanged(wnd, lp);
+                            return TRUE;
+                        case NM_CLICK: {
+                            // LVS_OWNERDATA + LVS_EX_CHECKBOXES：listview 不存储 checkbox 状态，
+                            // 用户点击后不会自动切换，手动检测并切换
+                            OnCheckboxClick(lp);
+                            return TRUE;
+                        }
+                        case NM_DBLCLK: {
+                            LPNMITEMACTIVATE lpnmitem = reinterpret_cast<LPNMITEMACTIVATE>(lp);
+                            int orig_idx = ViewIndexToOriginal(lpnmitem->iItem);
+                            if (orig_idx >= 0) {
+                                OnEditItemAt(wnd, orig_idx, lpnmitem->iSubItem);
+                            }
+                            return TRUE;
+                        }
                     }
                 }
             }
@@ -354,7 +362,12 @@ INT_PTR CALLBACK ConfirmResultDialog::DlgProc(HWND wnd, UINT msg, WPARAM wp, LPA
 
 void ConfirmResultDialog::DoInitDialog(HWND wnd) {
     InitFieldCheckboxes(wnd);
-    
+
+    // 默认阈值 50（百分比）
+    SetDlgItemTextW(wnd, IDC_CONF_THRESHOLD, L"50");
+    // 默认不启用过滤
+    CheckDlgButton(wnd, IDC_FILTER_LOW_CONF, BST_UNCHECKED);
+
     HWND hList = GetDlgItem(wnd, IDC_RESULT_LISTVIEW);
     if (!hList) return;
     
@@ -382,6 +395,9 @@ void ConfirmResultDialog::DoInitDialog(HWND wnd) {
     static const AnchorEntry entries[] = {
         {IDC_FIELD_GROUP,         AF_LEFT | AF_RIGHT | AF_TOP},
         {IDC_RESULT_LISTVIEW,     AF_LEFT | AF_RIGHT | AF_TOP | AF_BOTTOM},
+        {IDC_FILTER_LOW_CONF,     AF_LEFT | AF_BOTTOM},
+        {IDC_CONF_THRESHOLD,      AF_LEFT | AF_BOTTOM},
+        {IDC_SORT_CONF,           AF_LEFT | AF_BOTTOM},
         {IDC_SELECT_ALL,          AF_LEFT | AF_BOTTOM},
         {IDC_SELECT_NONE,         AF_LEFT | AF_BOTTOM},
         {IDC_SELECT_SUCCESS,      AF_LEFT | AF_BOTTOM},
@@ -405,11 +421,11 @@ void ConfirmResultDialog::InitFieldCheckboxes(HWND wnd) {
         s_field_selection["disc_number"] = true;
         s_field_selection["composer"] = true;
         s_field_selection["lyricist"] = true;
-        s_field_selection["conductor"] = false;
-        s_field_selection["performer"] = false;
+        s_field_selection["conductor"] = true;
+        s_field_selection["performer"] = true;
         s_field_selection["label"] = true;
-        s_field_selection["country"] = false;
-        s_field_selection["catalog_number"] = false;
+        s_field_selection["country"] = true;
+        s_field_selection["catalog_number"] = true;
     }
 
     CheckDlgButton(wnd, IDC_FIELD_TITLE, s_field_selection["title"] ? BST_CHECKED : BST_UNCHECKED);
@@ -457,196 +473,319 @@ void ConfirmResultDialog::PopulateListView(HWND wnd) {
     HWND hList = GetDlgItem(wnd, IDC_RESULT_LISTVIEW);
     if (!hList || !s_results) return;
 
-    ListView_DeleteAllItems(hList);
+    // 初始化 s_selected（仅第一次进入时全为 true）
+    if (s_selected) s_selected->resize(s_results->size(), true);
 
-    // 优先返回 scraped_fields 中的值；若不存在则回退到原始输入值
-    // 这样显示和保存内容保持一致（保存时未刮削字段会保留原值）
-    auto get_field_value = [](const TrackScrapingResult& result,
-                              const std::string& field_name,
-                              const TrackInput* original_input) -> std::string {
-        auto it = result.scraped_fields.find(field_name);
-        if (it != result.scraped_fields.end() && !it->second.value.empty()) {
-            return it->second.value;
+    // 初始化为默认视图（无过滤、无排序）
+    s_view_indices.clear();
+    s_sort_column = -1;
+    s_sort_descending = false;
+
+    RebuildViewIndices(wnd);
+}
+
+// 重建显示视图：根据 filter checkbox 和 sort 状态填充 s_view_indices，
+// 然后更新 listview 的 item count 触发重绘。
+void ConfirmResultDialog::RebuildViewIndices(HWND wnd) {
+    if (!s_results) { s_view_indices.clear(); return; }
+
+    HWND hList = GetDlgItem(wnd, IDC_RESULT_LISTVIEW);
+    HWND hFilter = GetDlgItem(wnd, IDC_FILTER_LOW_CONF);
+    HWND hThreshold = GetDlgItem(wnd, IDC_CONF_THRESHOLD);
+
+    // 读取过滤阈值（0-100，因为 ES_NUMBER 限定数字）
+    float threshold = 0.0f;
+    bool filter_enabled = false;
+    if (hFilter && hThreshold) {
+        filter_enabled = (IsDlgButtonChecked(wnd, IDC_FILTER_LOW_CONF) == BST_CHECKED);
+        wchar_t buf[16] = {0};
+        GetDlgItemTextW(wnd, IDC_CONF_THRESHOLD, buf, 16);
+        int v = _wtoi(buf);
+        if (v < 0) v = 0;
+        if (v > 100) v = 100;
+        threshold = static_cast<float>(v) / 100.0f;
+    }
+
+    s_view_indices.clear();
+    s_view_indices.reserve(s_results->size());
+    for (int i = 0; i < static_cast<int>(s_results->size()); ++i) {
+        if (filter_enabled) {
+            float conf = GetItemConfidence(i);
+            // UI 提示 "Hide confidence <"：隐藏低于阈值的项，只显示 >= threshold 的
+            if (conf < threshold) continue;
         }
-        // 回退到原始输入值（country/catalog_number 不在 TrackInput，无法回退）
-        if (original_input) {
-            if (field_name == "title")          return original_input->title;
-            if (field_name == "artist")         return original_input->artist;
-            if (field_name == "album")          return original_input->album;
-            if (field_name == "year")           return original_input->year;
-            if (field_name == "genre")          return original_input->genre;
-            if (field_name == "track_number")   return std::to_string(original_input->track_number);
-            if (field_name == "disc_number")    return std::to_string(original_input->disc_number);
-            if (field_name == "composer")       return original_input->composer;
-            if (field_name == "lyricist")       return original_input->lyricist;
-            if (field_name == "conductor")      return original_input->conductor;
-            if (field_name == "performer")      return original_input->performer;
-            if (field_name == "label")          return original_input->label;
-        }
-        return "";
-    };
+        s_view_indices.push_back(i);
+    }
 
-    for (size_t i = 0; i < s_results->size(); ++i) {
-        const auto& result = (*s_results)[i];
-        bool is_empty = !result.success || result.scraped_fields.empty();
+    // 排序：默认按 confidence 升序（低→高），便于先看低置信问题项
+    if (s_sort_column == 15) {  // column 15 = Confidence
+        std::sort(s_view_indices.begin(), s_view_indices.end(),
+            [](int a, int b) {
+                float ca = GetItemConfidence(a);
+                float cb = GetItemConfidence(b);
+                return s_sort_descending ? (ca > cb) : (ca < cb);
+            });
+    }
 
-        // 取原始输入以便回退显示
-        const TrackInput* original_input = nullptr;
-        if (s_original_inputs && i < s_original_inputs->size()) {
-            original_input = &(*s_original_inputs)[i];
-        }
-
-        LVITEM lvi = {0};
-        lvi.mask = LVIF_TEXT | LVIF_PARAM;
-        lvi.iItem = static_cast<int>(i);
-        lvi.lParam = static_cast<LPARAM>(i);
-
-        std::wstring track_id_w;
-        if (is_empty) {
-            std::string prefix = result.track_id.empty() ? "[FAILED] " : "[FAILED] ";
-            track_id_w = to_wstring(prefix + result.track_id.substr(0, 16) + (result.track_id.length() > 16 ? "..." : ""));
-        } else {
-            track_id_w = to_wstring(result.track_id.substr(0, 24) + (result.track_id.length() > 24 ? "..." : ""));
-        }
-        lvi.pszText = const_cast<wchar_t*>(track_id_w.c_str());
-        ListView_InsertItem(hList, &lvi);
-
-        std::wstring title = is_empty ? L"(no data)" : to_wstring(get_field_value(result, "title", original_input));
-        ListView_SetItemText(hList, static_cast<int>(i), 1, const_cast<wchar_t*>(title.c_str()));
-
-        std::wstring artist = is_empty ? L"" : to_wstring(get_field_value(result, "artist", original_input));
-        ListView_SetItemText(hList, static_cast<int>(i), 2, const_cast<wchar_t*>(artist.c_str()));
-
-        std::wstring album = is_empty ? L"" : to_wstring(get_field_value(result, "album", original_input));
-        ListView_SetItemText(hList, static_cast<int>(i), 3, const_cast<wchar_t*>(album.c_str()));
-
-        std::wstring year = is_empty ? L"" : to_wstring(get_field_value(result, "year", original_input));
-        ListView_SetItemText(hList, static_cast<int>(i), 4, const_cast<wchar_t*>(year.c_str()));
-
-        std::wstring genre = is_empty ? L"" : to_wstring(get_field_value(result, "genre", original_input));
-        ListView_SetItemText(hList, static_cast<int>(i), 5, const_cast<wchar_t*>(genre.c_str()));
-
-        std::wstring track_num = is_empty ? L"" : to_wstring(get_field_value(result, "track_number", original_input));
-        ListView_SetItemText(hList, static_cast<int>(i), 6, const_cast<wchar_t*>(track_num.c_str()));
-
-        std::wstring disc_num = is_empty ? L"" : to_wstring(get_field_value(result, "disc_number", original_input));
-        ListView_SetItemText(hList, static_cast<int>(i), 7, const_cast<wchar_t*>(disc_num.c_str()));
-
-        std::wstring composer = is_empty ? L"" : to_wstring(get_field_value(result, "composer", original_input));
-        ListView_SetItemText(hList, static_cast<int>(i), 8, const_cast<wchar_t*>(composer.c_str()));
-
-        std::wstring lyricist = is_empty ? L"" : to_wstring(get_field_value(result, "lyricist", original_input));
-        ListView_SetItemText(hList, static_cast<int>(i), 9, const_cast<wchar_t*>(lyricist.c_str()));
-
-        std::wstring conductor = is_empty ? L"" : to_wstring(get_field_value(result, "conductor", original_input));
-        ListView_SetItemText(hList, static_cast<int>(i), 10, const_cast<wchar_t*>(conductor.c_str()));
-
-        std::wstring performer = is_empty ? L"" : to_wstring(get_field_value(result, "performer", original_input));
-        ListView_SetItemText(hList, static_cast<int>(i), 11, const_cast<wchar_t*>(performer.c_str()));
-
-        std::wstring label = is_empty ? L"" : to_wstring(get_field_value(result, "label", original_input));
-        ListView_SetItemText(hList, static_cast<int>(i), 12, const_cast<wchar_t*>(label.c_str()));
-
-        std::wstring country = is_empty ? L"" : to_wstring(get_field_value(result, "country", original_input));
-        ListView_SetItemText(hList, static_cast<int>(i), 13, const_cast<wchar_t*>(country.c_str()));
-
-        std::wstring catalog = is_empty ? L"" : to_wstring(get_field_value(result, "catalog_number", original_input));
-        ListView_SetItemText(hList, static_cast<int>(i), 14, const_cast<wchar_t*>(catalog.c_str()));
-
-        std::ostringstream oss;
-        oss << std::fixed << std::setprecision(2);
-        float total_conf = 0.0f;
-        int count = 0;
-        for (const auto& field : result.scraped_fields) {
-            total_conf += field.second.confidence;
-            count++;
-        }
-        if (count > 0) {
-            oss << (total_conf / count);
-        } else {
-            oss << "0.00";
-        }
-        std::wstring conf_str = to_wstring(oss.str());
-        ListView_SetItemText(hList, static_cast<int>(i), 15, const_cast<wchar_t*>(conf_str.c_str()));
-
-        std::string source;
-        if (is_empty) {
-            source = result.error.empty() ? "Failed" : "Error";
-        } else {
-            switch (result.release_source) {
-                case DataSourceType::MUSICBRAINZ: source = "MusicBrainz"; break;
-                case DataSourceType::DISCOGS: source = "Discogs"; break;
-                case DataSourceType::AI: source = "AI"; break;
-            }
-        }
-        std::wstring source_w = to_wstring(source);
-        ListView_SetItemText(hList, static_cast<int>(i), 16, const_cast<wchar_t*>(source_w.c_str()));
-
-        if (s_selected && i < s_selected->size() && (*s_selected)[i]) {
-            ListView_SetCheckState(hList, static_cast<int>(i), TRUE);
+    if (hList) {
+        int n = static_cast<int>(s_view_indices.size());
+        ListView_SetItemCountEx(hList, n, LVSICF_NOINVALIDATEALL);
+        if (n > 0) {
+            // OWNERDATA + LVS_EX_CHECKBOXES 模式：listview 不存 state，只需触发重绘，
+            // LVN_GETDISPINFO 回调会返回最新 state
+            ListView_RedrawItems(hList, 0, n - 1);
+            UpdateWindow(hList);
         }
     }
 }
 
-void ConfirmResultDialog::OnSelectAll(HWND wnd) {
-    if (!s_selected) return;
-    
-    for (size_t i = 0; i < s_selected->size(); ++i) {
-        (*s_selected)[i] = true;
+// listview 显示行号 → s_results 原始索引
+int ConfirmResultDialog::ViewIndexToOriginal(int view_idx) {
+    if (s_view_indices.empty()) return view_idx;  // 无过滤/排序时直接映射
+    if (view_idx < 0 || view_idx >= static_cast<int>(s_view_indices.size())) return -1;
+    return s_view_indices[view_idx];
+}
+
+// 计算指定 s_results 索引项的平均 confidence
+float ConfirmResultDialog::GetItemConfidence(int original_idx) {
+    if (!s_results || original_idx < 0 || original_idx >= static_cast<int>(s_results->size())) return 0.0f;
+    const auto& result = (*s_results)[original_idx];
+    if (result.scraped_fields.empty()) return 0.0f;
+    float total = 0.0f;
+    int count = 0;
+    for (const auto& f : result.scraped_fields) {
+        total += f.second.confidence;
+        ++count;
     }
-    
+    return count > 0 ? (total / count) : 0.0f;
+}
+
+// LVN_GETDISPINFO 回调：按 iItem/iSubItem 提供单元格文本与复选框状态
+void ConfirmResultDialog::OnGetDispInfo(LPARAM lp) {
+    NMLVDISPINFO* di = reinterpret_cast<NMLVDISPINFO*>(lp);
+    if (!di || !s_results) return;
+    int view_idx = di->item.iItem;
+    int idx = ViewIndexToOriginal(view_idx);
+    if (idx < 0) return;
+
+    // 强制返回 state，确保 listview 每次 redraw 都拿到最新 checkbox 状态
+    // （OWNERDATA 模式下 listview 不存 state，必须主动提供）
+    // 关键：必须同时设置 stateMask，listview 才知道 state 改了什么
+    bool checked = s_selected && idx < static_cast<int>(s_selected->size()) && (*s_selected)[idx];
+    di->item.state = INDEXTOSTATEIMAGEMASK(checked ? 2 : 1);
+    di->item.stateMask = LVIS_STATEIMAGEMASK;
+    di->item.mask |= LVIF_STATE;
+
+    const auto& result = (*s_results)[idx];
+    bool is_empty = !result.success || result.scraped_fields.empty();
+
+    const TrackInput* orig = nullptr;
+    if (s_original_inputs && idx < static_cast<int>(s_original_inputs->size())) {
+        orig = &(*s_original_inputs)[idx];
+    }
+
+    if (!(di->item.mask & LVIF_TEXT)) return;
+
+    // 复用单元格字符串缓冲区：使用 thread-local 静态缓冲区避免悬空
+    static thread_local std::wstring cell_buf;
+    auto set_text = [&](const std::string& s) {
+        cell_buf = to_wstring(s);
+        di->item.pszText = const_cast<wchar_t*>(cell_buf.c_str());
+    };
+
+    auto get_field_value = [&](const std::string& field_name) -> std::string {
+        auto it = result.scraped_fields.find(field_name);
+        if (it != result.scraped_fields.end() && !it->second.value.empty()) {
+            return it->second.value;
+        }
+        if (orig) {
+            if (field_name == "title")          return orig->title;
+            if (field_name == "artist")         return orig->artist;
+            if (field_name == "album")          return orig->album;
+            if (field_name == "year")           return orig->year;
+            if (field_name == "genre")          return orig->genre;
+            if (field_name == "track_number")   return std::to_string(orig->track_number);
+            if (field_name == "disc_number")    return std::to_string(orig->disc_number);
+            if (field_name == "composer")       return orig->composer;
+            if (field_name == "lyricist")       return orig->lyricist;
+            if (field_name == "conductor")      return orig->conductor;
+            if (field_name == "performer")      return orig->performer;
+            if (field_name == "label")          return orig->label;
+        }
+        return "";
+    };
+
+    switch (di->item.iSubItem) {
+        case 0: {  // Track ID
+            if (is_empty) {
+                set_text("[FAILED] " + result.track_id.substr(0, 16) + (result.track_id.length() > 16 ? "..." : ""));
+            } else {
+                set_text(result.track_id.substr(0, 24) + (result.track_id.length() > 24 ? "..." : ""));
+            }
+            break;
+        }
+        case 1: set_text(is_empty ? "(no data)" : get_field_value("title")); break;
+        case 2: set_text(is_empty ? "" : get_field_value("artist")); break;
+        case 3: set_text(is_empty ? "" : get_field_value("album")); break;
+        case 4: set_text(is_empty ? "" : get_field_value("year")); break;
+        case 5: set_text(is_empty ? "" : get_field_value("genre")); break;
+        case 6: set_text(is_empty ? "" : get_field_value("track_number")); break;
+        case 7: set_text(is_empty ? "" : get_field_value("disc_number")); break;
+        case 8: set_text(is_empty ? "" : get_field_value("composer")); break;
+        case 9: set_text(is_empty ? "" : get_field_value("lyricist")); break;
+        case 10: set_text(is_empty ? "" : get_field_value("conductor")); break;
+        case 11: set_text(is_empty ? "" : get_field_value("performer")); break;
+        case 12: set_text(is_empty ? "" : get_field_value("label")); break;
+        case 13: set_text(is_empty ? "" : get_field_value("country")); break;
+        case 14: set_text(is_empty ? "" : get_field_value("catalog_number")); break;
+        case 15: {  // Confidence
+            std::ostringstream oss;
+            oss << std::fixed << std::setprecision(2);
+            float total_conf = 0.0f;
+            int count = 0;
+            for (const auto& f : result.scraped_fields) {
+                total_conf += f.second.confidence;
+                count++;
+            }
+            oss << (count > 0 ? (total_conf / count) : 0.0f);
+            set_text(oss.str());
+            break;
+        }
+        case 16: {  // Source
+            std::string source;
+            if (is_empty) source = result.error.empty() ? "Failed" : "Error";
+            else {
+                switch (result.release_source) {
+                    case DataSourceType::MUSICBRAINZ: source = "MusicBrainz"; break;
+                    case DataSourceType::DISCOGS: source = "Discogs"; break;
+                    case DataSourceType::AI: source = "AI"; break;
+                }
+            }
+            set_text(source);
+            break;
+        }
+    }
+}
+
+// LVN_ITEMCHANGED 同步复选框状态到 s_selected
+void ConfirmResultDialog::OnItemChanged(HWND wnd, LPARAM lp) {
+    NMLISTVIEW* pnm = reinterpret_cast<NMLISTVIEW*>(lp);
+    if (!pnm || !s_selected) return;
+    if (pnm->iItem < 0) return;
+    int idx = ViewIndexToOriginal(pnm->iItem);
+    if (idx < 0 || idx >= static_cast<int>(s_selected->size())) return;
+    if (!(pnm->uChanged & LVIF_STATE)) return;
+    int img = (pnm->uNewState >> 12) & 0xF;
+    if (img == 0) return;  // 0 = 无 state image（初始化或无 checkbox 行）
+    bool new_checked = (img == 2);
+    // 仅状态真正变化时才更新，避免消息循环
+    if (new_checked == (*s_selected)[idx]) return;
+    (*s_selected)[idx] = new_checked;
+    // 强制重绘该行触发 LVN_GETDISPINFO，使 checkbox 显示立即更新
     HWND hList = GetDlgItem(wnd, IDC_RESULT_LISTVIEW);
     if (hList) {
-        for (size_t i = 0; i < s_selected->size(); ++i) {
-            ListView_SetCheckState(hList, static_cast<int>(i), TRUE);
-        }
+        ListView_RedrawItems(hList, pnm->iItem, pnm->iItem);
+        UpdateWindow(hList);
+    }
+}
+
+// LVS_OWNERDATA + LVS_EX_CHECKBOXES：listview 不存储 checkbox 状态，用户点击无效。
+// NM_CLICK 中手动检测点击是否落在 checkbox 区域，切换 s_selected。
+void ConfirmResultDialog::OnCheckboxClick(LPARAM lp) {
+    if (!s_selected || !s_results) return;
+    LPNMITEMACTIVATE pnm = reinterpret_cast<LPNMITEMACTIVATE>(lp);
+    if (!pnm) return;
+    HWND hList = pnm->hdr.hwndFrom;
+    if (!hList) return;
+    int view_idx = pnm->iItem;
+    if (view_idx < 0) return;
+    int orig_idx = ViewIndexToOriginal(view_idx);
+    if (orig_idx < 0 || orig_idx >= static_cast<int>(s_selected->size())) return;
+
+    LVHITTESTINFO hit = {};
+    hit.pt = pnm->ptAction;
+    if (ListView_SubItemHitTest(hList, &hit) == -1) return;
+    if (!(hit.flags & LVHT_ONITEMSTATEICON)) return;
+
+    (*s_selected)[orig_idx] = !(*s_selected)[orig_idx];
+    ListView_RedrawItems(hList, view_idx, view_idx);
+    UpdateWindow(hList);
+}
+
+// "Hide confidence <" checkbox 状态变化时触发过滤
+// 处理在 DlgProc 的 IDC_FILTER_LOW_CONF case 中直接调用 RebuildViewIndices
+void ConfirmResultDialog::OnFilterLowConf(HWND wnd) {
+    RebuildViewIndices(wnd);
+}
+
+// "Sort by Confidence" 按钮：切换升降序
+void ConfirmResultDialog::OnSortByConfidence(HWND wnd) {
+    if (s_sort_column != 15) {
+        s_sort_column = 15;
+        s_sort_descending = false;  // 首次：升序（低→高，便于先看低置信）
+    } else {
+        s_sort_descending = !s_sort_descending;
+    }
+    RebuildViewIndices(wnd);
+}
+
+void ConfirmResultDialog::OnSelectAll(HWND wnd) {
+    if (!s_selected) return;
+    // 只勾选当前可见行（过滤隐藏的不操作）
+    for (int vi : s_view_indices) {
+        (*s_selected)[vi] = true;
+    }
+    HWND hList = GetDlgItem(wnd, IDC_RESULT_LISTVIEW);
+    if (hList && !s_view_indices.empty()) {
+        int n = static_cast<int>(s_view_indices.size());
+        ListView_RedrawItems(hList, 0, n - 1);
+        UpdateWindow(hList);
     }
 }
 
 void ConfirmResultDialog::OnSelectNone(HWND wnd) {
     if (!s_selected) return;
-    
-    for (size_t i = 0; i < s_selected->size(); ++i) {
-        (*s_selected)[i] = false;
+    // 只取消当前可见行
+    for (int vi : s_view_indices) {
+        (*s_selected)[vi] = false;
     }
-    
     HWND hList = GetDlgItem(wnd, IDC_RESULT_LISTVIEW);
-    if (hList) {
-        for (size_t i = 0; i < s_selected->size(); ++i) {
-            ListView_SetCheckState(hList, static_cast<int>(i), FALSE);
-        }
+    if (hList && !s_view_indices.empty()) {
+        int n = static_cast<int>(s_view_indices.size());
+        ListView_RedrawItems(hList, 0, n - 1);
+        UpdateWindow(hList);
     }
 }
 
 void ConfirmResultDialog::OnSelectSuccess(HWND wnd) {
     if (!s_selected || !s_results) return;
-    
     HWND hList = GetDlgItem(wnd, IDC_RESULT_LISTVIEW);
-    
-    for (size_t i = 0; i < s_selected->size(); ++i) {
-        const auto& result = (*s_results)[i];
-        bool is_success = result.success && !result.scraped_fields.empty();
-        (*s_selected)[i] = is_success;
-        
-        if (hList) {
-            ListView_SetCheckState(hList, static_cast<int>(i), is_success ? TRUE : FALSE);
-        }
+    // 只操作当前可见行
+    for (int vi : s_view_indices) {
+        const auto& result = (*s_results)[vi];
+        (*s_selected)[vi] = result.success && !result.scraped_fields.empty();
+    }
+    if (hList && !s_view_indices.empty()) {
+        int n = static_cast<int>(s_view_indices.size());
+        ListView_RedrawItems(hList, 0, n - 1);
+        UpdateWindow(hList);
     }
 }
 
 void ConfirmResultDialog::OnEditItem(HWND wnd) {
     HWND hList = GetDlgItem(wnd, IDC_RESULT_LISTVIEW);
     if (!hList || !s_results) return;
-    
+
     int selected = ListView_GetNextItem(hList, -1, LVNI_SELECTED);
-    if (selected < 0 || selected >= static_cast<int>(s_results->size())) {
-        return;
-    }
-    
-    OnEditItemAt(wnd, selected, 1);
+    if (selected < 0) return;
+    int orig_idx = ViewIndexToOriginal(selected);
+    if (orig_idx < 0 || orig_idx >= static_cast<int>(s_results->size())) return;
+
+    OnEditItemAt(wnd, orig_idx, 1);
 }
 
 void ConfirmResultDialog::OnEditItemAt(HWND wnd, int item_index, int sub_item) {
+    // item_index 这里是原始 s_results 索引（由 OnEditItem 转换后传入）
     if (!s_results || item_index < 0 || item_index >= static_cast<int>(s_results->size())) {
         return;
     }
@@ -696,13 +835,7 @@ void ConfirmResultDialog::OnEditItemAt(HWND wnd, int item_index, int sub_item) {
 
 void ConfirmResultDialog::OnOK(HWND wnd) {
     SaveFieldSelection(wnd);
-    
-    HWND hList = GetDlgItem(wnd, IDC_RESULT_LISTVIEW);
-    if (hList && s_selected) {
-        for (size_t i = 0; i < s_selected->size(); ++i) {
-            (*s_selected)[i] = ListView_GetCheckState(hList, static_cast<int>(i)) != FALSE;
-        }
-    }
+    // LVS_OWNERDATA 模式：s_selected 已通过 LVN_ITEMCHANGED 实时同步，无需重新读取
     s_confirmed = true;
     EndDialog(wnd, IDOK);
 }
@@ -964,12 +1097,24 @@ INT_PTR CALLBACK EnhanceConfirmDialog::DlgProc(HWND wnd, UINT msg, WPARAM wp, LP
         case WM_NOTIFY: {
             LPNMHDR pnmh = reinterpret_cast<LPNMHDR>(lp);
             if (pnmh->idFrom == IDC_ENHANCE_LISTVIEW) {
-                if (pnmh->code == NM_DBLCLK) {
-                    LPNMITEMACTIVATE pnmitem = reinterpret_cast<LPNMITEMACTIVATE>(lp);
-                    if (pnmitem->iItem >= 0) {
-                        OnEditItemAt(wnd, pnmitem->iItem, pnmitem->iSubItem);
+                switch (pnmh->code) {
+                    case LVN_GETDISPINFO:
+                        OnGetDispInfo(lp);
+                        return TRUE;
+                    case LVN_ITEMCHANGED:
+                        OnItemChanged(lp);
+                        return TRUE;
+                    case NM_CLICK: {
+                        OnCheckboxClick(lp);
+                        return TRUE;
                     }
-                    return TRUE;
+                    case NM_DBLCLK: {
+                        LPNMITEMACTIVATE pnmitem = reinterpret_cast<LPNMITEMACTIVATE>(lp);
+                        if (pnmitem->iItem >= 0) {
+                            OnEditItemAt(wnd, pnmitem->iItem, pnmitem->iSubItem);
+                        }
+                        return TRUE;
+                    }
                 }
             }
             break;
@@ -1051,113 +1196,183 @@ bool EnhanceConfirmDialog::IsFieldSelected(const std::string& field) {
 void EnhanceConfirmDialog::PopulateListView(HWND wnd) {
     HWND hList = GetDlgItem(wnd, IDC_ENHANCE_LISTVIEW);
     if (!hList || !s_results) return;
-    
-    ListView_DeleteAllItems(hList);
-    
-    for (size_t i = 0; i < s_results->size(); ++i) {
-        const auto& result = (*s_results)[i];
-        bool is_failed = !result.success;
-        
-        // 取原始输入以便在 *_zh 为空时回退显示（与 scrape 行为一致）
-        const TrackInput* original_input = nullptr;
-        if (s_original_inputs && i < s_original_inputs->size()) {
-            original_input = &(*s_original_inputs)[i];
-        }
-        
-        LVITEMW lvi = {0};
-        lvi.mask = LVIF_TEXT;
-        lvi.iItem = static_cast<int>(i);
-        
-        lvi.iSubItem = 0;
-        std::wstring track_id_w;
-        if (is_failed) {
-            track_id_w = to_wstring("[FAILED] " + result.track_id.substr(0, 20) + (result.track_id.length() > 20 ? "..." : ""));
-        } else {
-            track_id_w = to_wstring(result.track_id.substr(0, 24) + (result.track_id.length() > 24 ? "..." : ""));
-        }
-        lvi.pszText = const_cast<wchar_t*>(track_id_w.c_str());
-        ListView_InsertItem(hList, &lvi);
-        
-        // 显示回退：当 *_zh 为空（已是中文无需翻译）时，显示原始值，避免 UI 空白
-        std::string title_disp = result.title_zh;
-        std::string album_disp = result.album_zh;
-        std::string artist_disp = result.artist_zh;
-        if (!is_failed && original_input) {
-            if (title_disp.empty())  title_disp  = original_input->title;
-            if (album_disp.empty())  album_disp  = original_input->album;
-            if (artist_disp.empty()) artist_disp = original_input->artist;
-        }
-        
-        std::wstring title_zh_w = is_failed ? L"(no data)" : to_wstring(title_disp);
-        std::wstring album_zh_w = is_failed ? L"" : to_wstring(album_disp);
-        std::wstring artist_zh_w = is_failed ? L"" : to_wstring(artist_disp);
 
-        ListView_SetItemText(hList, static_cast<int>(i), 1, const_cast<wchar_t*>(title_zh_w.c_str()));
-        ListView_SetItemText(hList, static_cast<int>(i), 2, const_cast<wchar_t*>(album_zh_w.c_str()));
-        ListView_SetItemText(hList, static_cast<int>(i), 3, const_cast<wchar_t*>(artist_zh_w.c_str()));
+    // LVS_OWNERDATA：仅设置 item count
+    int n = static_cast<int>(s_results->size());
+    if (s_selected) s_selected->resize(n, false);
+    // 默认勾选：成功且非中文跳过项
+    for (int i = 0; i < n; ++i) {
+        const auto& r = (*s_results)[i];
+        bool is_failed = !r.success;
+        bool is_skipped = !is_failed && r.title_zh.empty() && r.album_zh.empty() && r.artist_zh.empty();
+        (*s_selected)[i] = !is_failed && !is_skipped;
+    }
+    ListView_SetItemCountEx(hList, n, LVSICF_NOINVALIDATEALL);
+    if (n > 0) ListView_RedrawItems(hList, 0, n - 1);
+}
 
-        // Confidence display: when success but all translation fields are empty,
-        // the track was already Chinese - show "N/A" instead of misleading "0.00".
-        std::wstring conf_w;
-        if (is_failed) {
-            conf_w = L"N/A";
-        } else if (result.title_zh.empty() && result.album_zh.empty() && result.artist_zh.empty()) {
-            conf_w = L"N/A (Chinese)";
-        } else {
-            std::ostringstream oss;
-            oss << std::fixed << std::setprecision(2) << result.translation_confidence;
-            conf_w = to_wstring(oss.str());
+void EnhanceConfirmDialog::OnGetDispInfo(LPARAM lp) {
+    NMLVDISPINFO* di = reinterpret_cast<NMLVDISPINFO*>(lp);
+    if (!di || !s_results) return;
+    int idx = di->item.iItem;
+    if (idx < 0 || idx >= static_cast<int>(s_results->size())) return;
+
+    const auto& result = (*s_results)[idx];
+    bool is_failed = !result.success;
+
+    const TrackInput* orig = nullptr;
+    if (s_original_inputs && idx < static_cast<int>(s_original_inputs->size())) {
+        orig = &(*s_original_inputs)[idx];
+    }
+
+    if (di->item.mask & LVIF_STATE) {
+        if (di->item.stateMask & LVIS_STATEIMAGEMASK) {
+            bool checked = s_selected && idx < static_cast<int>(s_selected->size()) && (*s_selected)[idx];
+            di->item.state = INDEXTOSTATEIMAGEMASK(checked ? 2 : 1);
         }
-        ListView_SetItemText(hList, static_cast<int>(i), 4, const_cast<wchar_t*>(conf_w.c_str()));
+    }
 
-        std::wstring success_w = is_failed ? L"Failed" : (conf_w == L"N/A (Chinese)" ? L"Skipped" : L"Yes");
-        ListView_SetItemText(hList, static_cast<int>(i), 5, const_cast<wchar_t*>(success_w.c_str()));
+    if (!(di->item.mask & LVIF_TEXT)) return;
 
-        // Already-Chinese tracks have nothing to write; default to unchecked.
-        bool is_skipped = !is_failed && result.title_zh.empty() && result.album_zh.empty() && result.artist_zh.empty();
-        bool checked = !is_failed && !is_skipped;
-        if (s_selected && i < s_selected->size()) {
-            checked = (*s_selected)[i];
+    static thread_local std::wstring cell_buf;
+    auto set_text = [&](const std::string& s) {
+        cell_buf = to_wstring(s);
+        di->item.pszText = const_cast<wchar_t*>(cell_buf.c_str());
+    };
+    auto set_wtext = [&](const std::wstring& s) {
+        cell_buf = s;
+        di->item.pszText = const_cast<wchar_t*>(cell_buf.c_str());
+    };
+
+    switch (di->item.iSubItem) {
+        case 0: {  // Track ID
+            if (is_failed) {
+                set_text("[FAILED] " + result.track_id.substr(0, 20) + (result.track_id.length() > 20 ? "..." : ""));
+            } else {
+                set_text(result.track_id.substr(0, 24) + (result.track_id.length() > 24 ? "..." : ""));
+            }
+            break;
         }
-        ListView_SetCheckState(hList, static_cast<int>(i), checked ? TRUE : FALSE);
+        case 1: {  // Title ZH
+            if (is_failed) { set_wtext(L"(no data)"); break; }
+            std::string disp = result.title_zh;
+            if (disp.empty() && orig) disp = orig->title;
+            set_text(disp);
+            break;
+        }
+        case 2: {  // Album ZH
+            if (is_failed) { set_wtext(L""); break; }
+            std::string disp = result.album_zh;
+            if (disp.empty() && orig) disp = orig->album;
+            set_text(disp);
+            break;
+        }
+        case 3: {  // Artist ZH
+            if (is_failed) { set_wtext(L""); break; }
+            std::string disp = result.artist_zh;
+            if (disp.empty() && orig) disp = orig->artist;
+            set_text(disp);
+            break;
+        }
+        case 4: {  // Confidence
+            if (is_failed) { set_wtext(L"N/A"); break; }
+            if (result.title_zh.empty() && result.album_zh.empty() && result.artist_zh.empty()) {
+                set_wtext(L"N/A (Chinese)");
+            } else {
+                std::ostringstream oss;
+                oss << std::fixed << std::setprecision(2) << result.translation_confidence;
+                set_text(oss.str());
+            }
+            break;
+        }
+        case 5: {  // Success
+            if (is_failed) { set_wtext(L"Failed"); break; }
+            if (result.title_zh.empty() && result.album_zh.empty() && result.artist_zh.empty()) {
+                set_wtext(L"Skipped");
+            } else {
+                set_wtext(L"Yes");
+            }
+            break;
+        }
     }
 }
 
-void EnhanceConfirmDialog::OnSelectAll(HWND wnd) {
-    HWND hList = GetDlgItem(wnd, IDC_ENHANCE_LISTVIEW);
+void EnhanceConfirmDialog::OnItemChanged(LPARAM lp) {
+    NMLISTVIEW* pnm = reinterpret_cast<NMLISTVIEW*>(lp);
+    if (!pnm || !s_selected) return;
+    if (pnm->iItem < 0 || pnm->iItem >= static_cast<int>(s_selected->size())) return;
+    if (pnm->uChanged & LVIF_STATE) {
+        if (pnm->uNewState & LVIS_STATEIMAGEMASK) {
+            int img = (pnm->uNewState >> 12) & 0xF;
+            (*s_selected)[pnm->iItem] = (img == 2);
+        }
+    }
+}
+
+// LVS_OWNERDATA + LVS_EX_CHECKBOXES：手动处理 checkbox 点击
+void EnhanceConfirmDialog::OnCheckboxClick(LPARAM lp) {
+    if (!s_selected || !s_results) return;
+    LPNMITEMACTIVATE pnm = reinterpret_cast<LPNMITEMACTIVATE>(lp);
+    if (!pnm) return;
+    HWND hList = pnm->hdr.hwndFrom;
     if (!hList) return;
-    
-    int count = ListView_GetItemCount(hList);
-    for (int i = 0; i < count; ++i) {
-        ListView_SetCheckState(hList, i, TRUE);
+    int idx = pnm->iItem;
+    if (idx < 0 || idx >= static_cast<int>(s_selected->size())) return;
+
+    LVHITTESTINFO hit = {};
+    hit.pt = pnm->ptAction;
+    if (ListView_SubItemHitTest(hList, &hit) == -1) return;
+    if (!(hit.flags & LVHT_ONITEMSTATEICON)) return;
+
+    (*s_selected)[idx] = !(*s_selected)[idx];
+    ListView_RedrawItems(hList, idx, idx);
+    UpdateWindow(hList);
+}
+
+void EnhanceConfirmDialog::OnSelectAll(HWND wnd) {
+    if (!s_selected) return;
+    std::fill(s_selected->begin(), s_selected->end(), true);
+    HWND hList = GetDlgItem(wnd, IDC_ENHANCE_LISTVIEW);
+    if (hList && !s_selected->empty()) {
+        int n = static_cast<int>(s_selected->size());
+        for (int i = 0; i < n; ++i) {
+            ListView_SetItemState(hList, i, INDEXTOSTATEIMAGEMASK(2), LVIS_STATEIMAGEMASK);
+        }
+        ListView_RedrawItems(hList, 0, n - 1);
+        UpdateWindow(hList);
     }
 }
 
 void EnhanceConfirmDialog::OnSelectNone(HWND wnd) {
+    if (!s_selected) return;
+    std::fill(s_selected->begin(), s_selected->end(), false);
     HWND hList = GetDlgItem(wnd, IDC_ENHANCE_LISTVIEW);
-    if (!hList) return;
-    
-    int count = ListView_GetItemCount(hList);
-    for (int i = 0; i < count; ++i) {
-        ListView_SetCheckState(hList, i, FALSE);
+    if (hList && !s_selected->empty()) {
+        int n = static_cast<int>(s_selected->size());
+        for (int i = 0; i < n; ++i) {
+            ListView_SetItemState(hList, i, INDEXTOSTATEIMAGEMASK(1), LVIS_STATEIMAGEMASK);
+        }
+        ListView_RedrawItems(hList, 0, n - 1);
+        UpdateWindow(hList);
     }
 }
 
 void EnhanceConfirmDialog::OnSelectSuccess(HWND wnd) {
     if (!s_selected || !s_results) return;
-
     HWND hList = GetDlgItem(wnd, IDC_ENHANCE_LISTVIEW);
-
-    for (size_t i = 0; i < s_selected->size(); ++i) {
+    int n = static_cast<int>(s_selected->size());
+    for (int i = 0; i < n; ++i) {
         const auto& result = (*s_results)[i];
-        // "Success" = has actual translation to write. Skip already-Chinese tracks.
         bool has_translation = result.success &&
             !(result.title_zh.empty() && result.album_zh.empty() && result.artist_zh.empty());
         (*s_selected)[i] = has_translation;
-
         if (hList) {
-            ListView_SetCheckState(hList, static_cast<int>(i), has_translation ? TRUE : FALSE);
+            ListView_SetItemState(hList, i, INDEXTOSTATEIMAGEMASK(has_translation ? 2 : 1), LVIS_STATEIMAGEMASK);
         }
+    }
+    if (hList && n > 0) {
+        ListView_RedrawItems(hList, 0, n - 1);
+        UpdateWindow(hList);
     }
 }
 
@@ -1217,13 +1432,7 @@ void EnhanceConfirmDialog::OnEditItemAt(HWND wnd, int item_index, int sub_item) 
 
 void EnhanceConfirmDialog::OnOK(HWND wnd) {
     SaveFieldSelection(wnd);
-    
-    HWND hList = GetDlgItem(wnd, IDC_ENHANCE_LISTVIEW);
-    if (hList && s_selected) {
-        for (size_t i = 0; i < s_selected->size(); ++i) {
-            (*s_selected)[i] = ListView_GetCheckState(hList, static_cast<int>(i)) != FALSE;
-        }
-    }
+    // LVS_OWNERDATA：s_selected 已实时同步
     s_confirmed = true;
     EndDialog(wnd, IDOK);
 }
@@ -1407,12 +1616,27 @@ INT_PTR CALLBACK NormalizeConfirmDialog::DlgProc(HWND wnd, UINT msg, WPARAM wp, 
         case WM_NOTIFY: {
             LPNMHDR pnmh = reinterpret_cast<LPNMHDR>(lp);
             if (pnmh->idFrom == IDC_NORMALIZE_CONFIRM_LIST) {
-                if (pnmh->code == NM_DBLCLK) {
-                    LPNMITEMACTIVATE pnmitem = reinterpret_cast<LPNMITEMACTIVATE>(lp);
-                    if (pnmitem->iItem >= 0) {
-                        OnEditGroupAt(wnd, pnmitem->iItem);
+                switch (pnmh->code) {
+                    case LVN_GETDISPINFO:
+                        OnGetDispInfo(lp);
+                        return TRUE;
+                    case LVN_ITEMCHANGED:
+                        OnItemChanged(lp);
+                        return TRUE;
+                    case NM_CLICK: {
+                        // LVS_OWNERDATA + LVS_EX_CHECKBOXES 模式下，点击 checkbox 时
+                        // listview 不存储状态，会立即用 LVN_GETDISPINFO 还原。所以必须在
+                        // NM_CLICK 中手动检测点击位置并切换 s_selected_groups
+                        OnClick(wnd, lp);
+                        return TRUE;
                     }
-                    return TRUE;
+                    case NM_DBLCLK: {
+                        LPNMITEMACTIVATE pnmitem = reinterpret_cast<LPNMITEMACTIVATE>(lp);
+                        if (pnmitem->iItem >= 0) {
+                            OnEditGroupAt(wnd, pnmitem->iItem);
+                        }
+                        return TRUE;
+                    }
                 }
             }
             break;
@@ -1468,108 +1692,189 @@ void NormalizeConfirmDialog::PopulateListView(HWND wnd) {
     HWND hList = GetDlgItem(wnd, IDC_NORMALIZE_CONFIRM_LIST);
     if (!hList || !s_result) return;
 
-    ListView_DeleteAllItems(hList);
-
-    int row = 0;
-    // Groups
-    for (size_t i = 0; i < s_result->groups.size(); ++i) {
-        const auto& g = s_result->groups[i];
-
-        LVITEMW lvi = {0};
-        lvi.mask = LVIF_TEXT;
-        lvi.iItem = row;
-        lvi.iSubItem = 0;
-        std::wstring type_w = L"Group";
-        lvi.pszText = const_cast<wchar_t*>(type_w.c_str());
-        ListView_InsertItem(hList, &lvi);
-
-        std::wstring canonical_w = to_wstring(g.canonical_name);
-        ListView_SetItemText(hList, row, 1, const_cast<wchar_t*>(canonical_w.c_str()));
-
-        // 拼接 aliases（过滤空字符串，避免出现连续分隔符如 ", ,"）
-        std::string aliases_str;
-        for (size_t j = 0; j < g.aliases.size(); ++j) {
-            if (g.aliases[j].empty()) continue;
-            if (!aliases_str.empty()) aliases_str += ", ";
-            aliases_str += g.aliases[j];
-        }
-        std::wstring aliases_w = to_wstring(aliases_str);
-        ListView_SetItemText(hList, row, 2, const_cast<wchar_t*>(aliases_w.c_str()));
-
-        std::wostringstream conf_ss;
-        conf_ss << std::fixed << std::setprecision(2) << g.confidence;
-        std::wstring conf_w = conf_ss.str();
-        ListView_SetItemText(hList, row, 3, const_cast<wchar_t*>(conf_w.c_str()));
-
-        std::wstring reason_w = to_wstring(g.reason);
-        ListView_SetItemText(hList, row, 4, const_cast<wchar_t*>(reason_w.c_str()));
-
-        // 默认勾选
-        bool checked = (s_selected_groups && row < (int)s_selected_groups->size()) ? (*s_selected_groups)[row] : true;
-        ListView_SetCheckState(hList, row, checked ? TRUE : FALSE);
-        row++;
+    // LVS_OWNERDATA：item 总数 = groups + uncertain
+    int total = static_cast<int>(s_result->groups.size() + s_result->uncertain.size());
+    // 确保 s_selected_groups 至少覆盖 groups（uncertain 不可选），新元素默认 true
+    if (s_selected_groups && s_selected_groups->size() < s_result->groups.size()) {
+        s_selected_groups->resize(s_result->groups.size(), true);
     }
 
-    // Uncertain
-    for (size_t i = 0; i < s_result->uncertain.size(); ++i) {
-        const auto& u = s_result->uncertain[i];
+    // 设置初始化标志，防止 ListView_SetItemCountEx 触发的 LVN_ITEMCHANGED
+    // 把 s_selected_groups 覆盖成 false（listview 默认 state image = 1 = unchecked）
+    s_populating = true;
+    ListView_SetItemCountEx(hList, total, LVSICF_NOINVALIDATEALL);
+    s_populating = false;
 
-        LVITEMW lvi = {0};
-        lvi.mask = LVIF_TEXT;
-        lvi.iItem = row;
-        lvi.iSubItem = 0;
-        std::wstring type_w = L"? Uncertain";
-        lvi.pszText = const_cast<wchar_t*>(type_w.c_str());
-        ListView_InsertItem(hList, &lvi);
-
-        // uncertain: Canonical Name 空（未找到规范名）
-        ListView_SetItemText(hList, row, 1, const_cast<wchar_t*>(L"(uncertain)"));
-
-        // Aliases 列显示 alias 本身（待规范的别名）
-        std::wstring aliases_w = to_wstring(u.alias);
-        ListView_SetItemText(hList, row, 2, const_cast<wchar_t*>(aliases_w.c_str()));
-
-        ListView_SetItemText(hList, row, 3, const_cast<wchar_t*>(L"-"));
-
-        // Reason 列显示原因（完整内容）
-        std::wstring reason_w = to_wstring(u.reason);
-        ListView_SetItemText(hList, row, 4, const_cast<wchar_t*>(reason_w.c_str()));
-
-        // uncertain 不允许勾选（禁用 checkbox 不可行，直接置灰行）
-        ListView_SetCheckState(hList, row, FALSE);
-        // 标记为不可选：通过 item data
-        LVITEMW lvi2 = {0};
-        lvi2.iItem = row;
-        lvi2.mask = LVIF_PARAM;
-        lvi2.lParam = 1;  // 1 = uncertain，不可选
-        ListView_SetItem(hList, &lvi2);
-        row++;
+    // 触发重绘，让 LVN_GETDISPINFO 返回正确的 state（包括 checkbox 状态）
+    if (total > 0) {
+        ListView_RedrawItems(hList, 0, total - 1);
+        UpdateWindow(hList);
     }
 }
 
-void NormalizeConfirmDialog::OnSelectAll(HWND wnd) {
-    HWND hList = GetDlgItem(wnd, IDC_NORMALIZE_CONFIRM_LIST);
+// 判断行是否为 uncertain（按索引计算，无需 lParam）
+inline bool NormalizeConfirmDialog::IsUncertainRow(int idx) {
+    if (!s_result) return false;
+    return idx >= static_cast<int>(s_result->groups.size());
+}
+
+void NormalizeConfirmDialog::OnGetDispInfo(LPARAM lp) {
+    NMLVDISPINFO* di = reinterpret_cast<NMLVDISPINFO*>(lp);
+    if (!di || !s_result) return;
+    int idx = di->item.iItem;
+    int group_count = static_cast<int>(s_result->groups.size());
+    int total = group_count + static_cast<int>(s_result->uncertain.size());
+    if (idx < 0 || idx >= total) return;
+
+    bool is_uncertain = (idx >= group_count);
+
+    // 复选框状态：LVS_EX_CHECKBOXES 需要返回 LVIF_STATE。
+    // 关键修复：即使 mask 不包含 LVIF_STATE，也要强制设置 state，
+    // 因为 LVS_OWNERDATA 下 listview 不存储状态，每次绘制 checkbox 都会请求。
+    // 如果只在 mask & LVIF_STATE 时设置，首次绘制可能漏掉，导致 checkbox 显示为未勾选。
+    di->item.mask |= LVIF_STATE;
+    if (is_uncertain) {
+        // uncertain 行：无复选框（state image 0）
+        di->item.state = INDEXTOSTATEIMAGEMASK(0);
+        di->item.stateMask = LVIS_STATEIMAGEMASK;
+    } else {
+        bool checked = s_selected_groups && idx < static_cast<int>(s_selected_groups->size()) && (*s_selected_groups)[idx];
+        di->item.state = INDEXTOSTATEIMAGEMASK(checked ? 2 : 1);
+        di->item.stateMask = LVIS_STATEIMAGEMASK;
+    }
+
+    if (!(di->item.mask & LVIF_TEXT)) return;
+
+    // 注意：每个 subitem 的文本缓冲必须独立，避免被后续覆盖
+    static thread_local std::wstring cell_buf;
+    auto set_text = [&](const std::string& s) {
+        cell_buf = to_wstring(s);
+        di->item.pszText = const_cast<wchar_t*>(cell_buf.c_str());
+    };
+    auto set_wtext = [&](const std::wstring& s) {
+        cell_buf = s;
+        di->item.pszText = const_cast<wchar_t*>(cell_buf.c_str());
+    };
+
+    if (!is_uncertain) {
+        const auto& g = s_result->groups[idx];
+        switch (di->item.iSubItem) {
+            case 0: set_wtext(L"Group"); break;
+            case 1: set_text(g.canonical_name); break;
+            case 2: {
+                std::string aliases_str;
+                for (size_t j = 0; j < g.aliases.size(); ++j) {
+                    if (g.aliases[j].empty()) continue;
+                    if (!aliases_str.empty()) aliases_str += ", ";
+                    aliases_str += g.aliases[j];
+                }
+                set_text(aliases_str);
+                break;
+            }
+            case 3: {
+                std::wostringstream conf_ss;
+                conf_ss << std::fixed << std::setprecision(2) << g.confidence;
+                set_wtext(conf_ss.str());
+                break;
+            }
+            case 4: set_text(g.reason); break;
+        }
+    } else {
+        int u_idx = idx - group_count;
+        const auto& u = s_result->uncertain[u_idx];
+        switch (di->item.iSubItem) {
+            case 0: set_wtext(L"? Uncertain"); break;
+            case 1: set_wtext(L"(uncertain)"); break;
+            case 2: set_text(u.alias); break;
+            case 3: set_wtext(L"-"); break;
+            case 4: set_text(u.reason); break;
+        }
+    }
+}
+
+void NormalizeConfirmDialog::OnItemChanged(LPARAM lp) {
+    NMLISTVIEW* pnm = reinterpret_cast<NMLISTVIEW*>(lp);
+    if (!pnm || !s_selected_groups || !s_result) return;
+    // 初始化期间（PopulateListView 调用 ListView_SetItemCountEx/RedrawItems）
+    // 会触发 LVN_ITEMCHANGED，此时不应同步 s_selected_groups（会用 listview
+    // 默认 unchecked 覆盖我们设置的 true）
+    if (s_populating) return;
+    int idx = pnm->iItem;
+    if (idx < 0 || idx >= static_cast<int>(s_result->groups.size())) return;  // 仅 groups 可选
+    // 只有当 state image 真正变化时才同步（uChanged & LVIF_STATE）
+    if (!(pnm->uChanged & LVIF_STATE)) return;
+    // 提取 state image index（bits 12-15）
+    int img = (pnm->uNewState >> 12) & 0xF;
+    if (img == 0) return;  // 0 表示无 state image（uncertain 行或初始化）
+    bool new_checked = (img == 2);  // 2 = checked, 1 = unchecked
+    // 仅当状态真正变化时才更新和重绘（避免消息循环）
+    if (idx < static_cast<int>(s_selected_groups->size()) &&
+        (*s_selected_groups)[idx] != new_checked) {
+        (*s_selected_groups)[idx] = new_checked;
+        // LVS_OWNERDATA 下 listview 不存储状态，需手动触发重绘
+        // pnm->hdr.hwndFrom 就是 listview 控件句柄
+        ListView_RedrawItems(pnm->hdr.hwndFrom, idx, idx);
+        UpdateWindow(pnm->hdr.hwndFrom);
+    }
+}
+
+void NormalizeConfirmDialog::OnClick(HWND wnd, LPARAM lp) {
+    // LVS_OWNERDATA + LVS_EX_CHECKBOXES 模式下，点击 checkbox 时 listview 不存储状态，
+    // 会立即用 LVN_GETDISPINFO 还原为 s_selected_groups 中的值，导致用户点击"无效"。
+    // 这里手动检测点击是否落在 checkbox 区域，并切换 s_selected_groups[idx]。
+    if (!s_selected_groups || !s_result) return;
+
+    LPNMITEMACTIVATE pnm = reinterpret_cast<LPNMITEMACTIVATE>(lp);
+    if (!pnm) return;
+
+    HWND hList = pnm->hdr.hwndFrom;
     if (!hList) return;
-    int count = ListView_GetItemCount(hList);
-    for (int i = 0; i < count; ++i) {
-        LPARAM lp = 0;
-        LVITEMW lvi = {0};
-        lvi.iItem = i;
-        lvi.mask = LVIF_PARAM;
-        lvi.lParam = 0;
-        ListView_GetItem(hList, &lvi);
-        if (lvi.lParam == 0) {
-            ListView_SetCheckState(hList, i, TRUE);
+
+    int idx = pnm->iItem;
+    if (idx < 0 || idx >= static_cast<int>(s_result->groups.size())) return;  // 仅 groups 可选
+
+    // 检测点击位置是否在 checkbox 区域（state image 区域）
+    // 方法：获取该 item 的 rect，判断点击 X 坐标是否落在 checkbox 宽度内
+    LVHITTESTINFO hit = {};
+    hit.pt = pnm->ptAction;
+    // ptAction 是 client 坐标，直接用 hit test
+    if (ListView_SubItemHitTest(hList, &hit) == -1) return;
+
+    // 检查 hit 标志：LVHT_ONITEMSTATEICON 表示点击在 checkbox 上
+    if (!(hit.flags & LVHT_ONITEMSTATEICON)) return;
+
+    // 切换状态
+    if (idx >= static_cast<int>(s_selected_groups->size())) return;
+    (*s_selected_groups)[idx] = !(*s_selected_groups)[idx];
+
+    // 强制重绘该行（触发 LVN_GETDISPINFO 返回新状态）
+    ListView_RedrawItems(hList, idx, idx);
+    UpdateWindow(hList);
+}
+
+void NormalizeConfirmDialog::OnSelectAll(HWND wnd) {
+    if (!s_selected_groups || !s_result) return;
+    std::fill(s_selected_groups->begin(), s_selected_groups->end(), true);
+    HWND hList = GetDlgItem(wnd, IDC_NORMALIZE_CONFIRM_LIST);
+    if (hList) {
+        int total = static_cast<int>(s_result->groups.size() + s_result->uncertain.size());
+        if (total > 0) {
+            ListView_RedrawItems(hList, 0, total - 1);
+            UpdateWindow(hList);
         }
     }
 }
 
 void NormalizeConfirmDialog::OnSelectNone(HWND wnd) {
+    if (!s_selected_groups || !s_result) return;
+    std::fill(s_selected_groups->begin(), s_selected_groups->end(), false);
     HWND hList = GetDlgItem(wnd, IDC_NORMALIZE_CONFIRM_LIST);
-    if (!hList) return;
-    int count = ListView_GetItemCount(hList);
-    for (int i = 0; i < count; ++i) {
-        ListView_SetCheckState(hList, i, FALSE);
+    if (hList) {
+        int total = static_cast<int>(s_result->groups.size() + s_result->uncertain.size());
+        if (total > 0) {
+            ListView_RedrawItems(hList, 0, total - 1);
+            UpdateWindow(hList);
+        }
     }
 }
 
@@ -1579,23 +1884,14 @@ void NormalizeConfirmDialog::OnEditGroupAt(HWND wnd, int item_index) {
     HWND hList = GetDlgItem(wnd, IDC_NORMALIZE_CONFIRM_LIST);
     if (!hList) return;
 
-    // 判断行类型：lParam==1 表示 uncertain
-    LVITEMW lvi = {0};
-    lvi.iItem = item_index;
-    lvi.mask = LVIF_PARAM;
-    lvi.lParam = 0;
-    ListView_GetItem(hList, &lvi);
-    bool is_uncertain = (lvi.lParam == 1);
-
     int group_count = (int)s_result->groups.size();
+    bool is_uncertain = (item_index >= group_count);
 
-    // 准备编辑对话框的初始值
     std::string init_canonical;
     std::vector<std::string> init_aliases;
     std::string init_reason;
 
     if (is_uncertain) {
-        // uncertain 行：用 alias 本身作为初始 canonical 和 aliases
         int uncertain_idx = item_index - group_count;
         if (uncertain_idx < 0 || uncertain_idx >= (int)s_result->uncertain.size()) return;
         const auto& u = s_result->uncertain[uncertain_idx];
@@ -1603,7 +1899,6 @@ void NormalizeConfirmDialog::OnEditGroupAt(HWND wnd, int item_index) {
         init_aliases = {u.alias};
         init_reason = u.reason;
     } else {
-        // group 行：编辑现有 group
         if (item_index >= group_count) return;
         const auto& g = s_result->groups[item_index];
         init_canonical = g.canonical_name;
@@ -1617,17 +1912,14 @@ void NormalizeConfirmDialog::OnEditGroupAt(HWND wnd, int item_index) {
         return;
     }
 
-    // 去重 alias：保留首次出现的顺序，避免用户编辑后产生重复（如 "尹美莱" 出现两次）
-    // 去重同时去除空字符串
+    // 去重 alias
     {
         std::set<std::string> seen;
         std::vector<std::string> deduped;
         deduped.reserve(out_aliases.size());
         for (const auto& a : out_aliases) {
             if (a.empty()) continue;
-            if (seen.insert(a).second) {
-                deduped.push_back(a);
-            }
+            if (seen.insert(a).second) deduped.push_back(a);
         }
         out_aliases.swap(deduped);
     }
@@ -1641,76 +1933,61 @@ void NormalizeConfirmDialog::OnEditGroupAt(HWND wnd, int item_index) {
         out_aliases.insert(out_aliases.begin(), out_canonical);
     }
 
-    // 保存当前勾选状态（PopulateListView 会重建列表）
-    std::vector<bool> saved_checks;
-    int old_count = ListView_GetItemCount(hList);
-    for (int i = 0; i < old_count; ++i) {
-        saved_checks.push_back(ListView_GetCheckState(hList, i) != FALSE);
-    }
-
     if (is_uncertain) {
-        // uncertain → group：从 uncertain 删除，添加新 group
         int uncertain_idx = item_index - group_count;
         s_result->uncertain.erase(s_result->uncertain.begin() + uncertain_idx);
 
         NormalizeGroup new_g;
         new_g.canonical_name = out_canonical;
         new_g.aliases = out_aliases;
-        new_g.confidence = 1.0f;  // 人工确认
+        new_g.confidence = 1.0f;
         new_g.reason = "User confirmed (from uncertain)";
         s_result->groups.push_back(std::move(new_g));
 
-        // 扩容 selected_groups，新 group 默认勾选
-        if (s_selected_groups) {
-            s_selected_groups->push_back(true);
-        }
+        if (s_selected_groups) s_selected_groups->push_back(true);
     } else {
-        // 编辑现有 group
         NormalizeGroup& g = s_result->groups[item_index];
         g.canonical_name = out_canonical;
         g.aliases = out_aliases;
     }
 
-    // 刷新 ListView 显示
+    // 刷新列表（LVS_OWNERDATA：重新设置 item count 触发 LVN_GETDISPINFO）
     PopulateListView(wnd);
-
-    // 恢复勾选状态（按行号对齐；groups 数量可能已变化）
-    int new_count = ListView_GetItemCount(hList);
-    for (int i = 0; i < new_count && i < (int)saved_checks.size(); ++i) {
-        LVITEMW lvi2 = {0};
-        lvi2.iItem = i;
-        lvi2.mask = LVIF_PARAM;
-        lvi2.lParam = 0;
-        ListView_GetItem(hList, &lvi2);
-        if (lvi2.lParam == 0) {
-            ListView_SetCheckState(hList, i, saved_checks[i] ? TRUE : FALSE);
-        }
-    }
-    // 新增的 group 行（如果是 uncertain→group 转换）默认勾选
-    if (is_uncertain && s_selected_groups && !s_selected_groups->empty()) {
-        int last_group_row = (int)s_result->groups.size() - 1;
-        if (last_group_row < new_count) {
-            ListView_SetCheckState(hList, last_group_row, TRUE);
-        }
-    }
 }
 
 void NormalizeConfirmDialog::OnOK(HWND wnd) {
-    HWND hList = GetDlgItem(wnd, IDC_NORMALIZE_CONFIRM_LIST);
-    if (!hList || !s_selected_groups || !s_result) {
+    Logger::instance().info("[NormalizeConfirm] OnOK: ENTER");
+
+    // LVS_OWNERDATA：s_selected_groups 已在 LVN_ITEMCHANGED 中实时同步，无需读取 ListView
+    if (!s_selected_groups || !s_result) {
+        Logger::instance().info("[NormalizeConfirm] OnOK: null s_selected_groups or s_result, cancelling");
         s_confirmed = false;
         EndDialog(wnd, IDCANCEL);
         return;
     }
 
-    // 只收集 groups 部分（前 s_result->groups.size() 行）
-    size_t group_count = s_result->groups.size();
-    s_selected_groups->assign(group_count, false);
-    for (size_t i = 0; i < group_count; ++i) {
-        (*s_selected_groups)[i] = ListView_GetCheckState(hList, (int)i) != FALSE;
+    Logger::instance().info("[NormalizeConfirm] OnOK: groups=" + std::to_string(s_result->groups.size()) +
+                            ", uncertain=" + std::to_string(s_result->uncertain.size()) +
+                            ", selected_groups_size=" + std::to_string(s_selected_groups->size()));
+
+    // 仅保留 groups 部分的勾选状态（resize 时保留已有值，新元素默认 true）
+    if (s_selected_groups->size() < s_result->groups.size()) {
+        s_selected_groups->resize(s_result->groups.size(), true);
+    } else if (s_selected_groups->size() > s_result->groups.size()) {
+        s_selected_groups->resize(s_result->groups.size());
     }
+
+    // 统计选中数量（诊断用）
+    int selected_count = 0;
+    for (size_t i = 0; i < s_selected_groups->size(); ++i) {
+        if ((*s_selected_groups)[i]) ++selected_count;
+    }
+    Logger::instance().info("[NormalizeConfirm] OnOK: selected_count=" + std::to_string(selected_count));
+
     s_confirmed = true;
+    Logger::instance().info("[NormalizeConfirm] OnOK: calling EndDialog");
     EndDialog(wnd, IDOK);
+    Logger::instance().info("[NormalizeConfirm] OnOK: EXIT");
 }
 
 void NormalizeConfirmDialog::OnCancel(HWND wnd) {
@@ -2057,6 +2334,97 @@ void RollbackTypeDialog::OnOK(HWND wnd) {
 void RollbackTypeDialog::OnCancel(HWND wnd) {
     s_confirmed = false;
     EndDialog(wnd, IDCANCEL);
+}
+
+// ==================== Completion Dialog ====================
+
+CompletionStats CompletionDialog::s_stats;
+
+static std::wstring format_elapsed(int64_t ms) {
+    if (ms < 1000) {
+        return std::to_wstring(ms) + L" ms";
+    }
+    double sec = ms / 1000.0;
+    std::wostringstream woss;
+    if (sec < 60) {
+        woss << std::fixed << std::setprecision(1) << sec << L" s";
+    } else {
+        int m = static_cast<int>(sec) / 60;
+        int s = static_cast<int>(sec) % 60;
+        woss << m << L"m " << s << L"s";
+    }
+    return woss.str();
+}
+
+bool CompletionDialog::Show(HWND parent, const CompletionStats& stats) {
+    s_stats = stats;
+    INT_PTR ret = DialogBoxParam(
+        core_api::get_my_instance(),
+        MAKEINTRESOURCE(IDD_COMPLETION),
+        parent,
+        CompletionDialog::DlgProc,
+        0
+    );
+    return ret == IDOK;
+}
+
+INT_PTR CALLBACK CompletionDialog::DlgProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
+    static bool s_details_expanded = false;
+    switch (msg) {
+        case WM_INITDIALOG: {
+            s_details_expanded = false;
+            // 标题
+            if (!s_stats.caption.empty()) {
+                SetWindowTextW(wnd, to_wstring(s_stats.caption).c_str());
+            }
+            // 各字段
+            SetDlgItemInt(wnd, IDC_TOTAL_TRACKS, s_stats.total_tracks, FALSE);
+            SetDlgItemInt(wnd, IDC_SUCCESS_COUNT, s_stats.success_count, FALSE);
+            SetDlgItemInt(wnd, IDC_FAILED_COUNT, s_stats.failed_count, FALSE);
+            SetDlgItemInt(wnd, IDC_CACHE_HITS, s_stats.cache_hits, FALSE);
+            SetDlgItemInt(wnd, IDC_API_CALLS, s_stats.api_calls, FALSE);
+            SetDlgItemInt(wnd, IDC_TOKENS_USED, s_stats.tokens_used, FALSE);
+            SetDlgItemTextW(wnd, IDC_ELAPSED_TIME, format_elapsed(s_stats.elapsed_ms).c_str());
+            if (!s_stats.details_label.empty()) {
+                SetDlgItemTextW(wnd, IDC_DETAILS_LABEL, to_wstring(s_stats.details_label).c_str());
+            } else {
+                SetDlgItemTextW(wnd, IDC_DETAILS_LABEL, L"");
+            }
+            // 填充失败详情到隐藏的 EDITTEXT；若无失败项则禁用 View Details 按钮
+            if (!s_stats.failed_details.empty()) {
+                std::ostringstream oss;
+                for (const auto& line : s_stats.failed_details) {
+                    oss << line << "\r\n";
+                }
+                SetDlgItemTextW(wnd, IDC_DETAILS_EDIT, to_wstring(oss.str()).c_str());
+            } else {
+                EnableWindow(GetDlgItem(wnd, IDVIEWDETAILS), FALSE);
+            }
+            return TRUE;
+        }
+        case WM_COMMAND:
+            switch (LOWORD(wp)) {
+                case IDOK:
+                    EndDialog(wnd, IDOK);
+                    return TRUE;
+                case IDVIEWDETAILS: {
+                    // 切换详情编辑框的显示状态
+                    HWND hEdit = GetDlgItem(wnd, IDC_DETAILS_EDIT);
+                    if (hEdit) {
+                        s_details_expanded = !s_details_expanded;
+                        ShowWindow(hEdit, s_details_expanded ? SW_SHOW : SW_HIDE);
+                        SetDlgItemTextW(wnd, IDVIEWDETAILS,
+                                        s_details_expanded ? L"Hide Details" : L"View Details");
+                    }
+                    return TRUE;
+                }
+                case IDCANCEL:
+                    EndDialog(wnd, IDCANCEL);
+                    return TRUE;
+            }
+            break;
+    }
+    return FALSE;
 }
 
 }

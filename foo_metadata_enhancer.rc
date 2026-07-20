@@ -97,10 +97,10 @@ BEGIN
     EDITTEXT        IDC_BATCH_SIZE_PREF, 58, 123, 30, 12, ES_NUMBER
     LTEXT           "(tracks per AI call)", IDC_STATIC, 95, 125, 70, 8
 
-    LTEXT           "Note: MusicBrainz technical parameters (timeout, retries, scoring) are on the Advanced page.", IDC_STATIC, 7, 150, 306, 20
+    LTEXT           "Note: MusicBrainz technical parameters (timeout, retries, scoring) are on the Processing page.", IDC_STATIC, 7, 150, 306, 20
 END
 
-IDD_PREF_ADVANCED DIALOGEX 0, 0, 320, 290
+IDD_PREF_PROCESSING DIALOGEX 0, 0, 320, 200
 STYLE DS_SETFONT | DS_FIXEDSYS | WS_CHILD | WS_VISIBLE
 FONT 8, "MS Shell Dlg"
 BEGIN
@@ -120,33 +120,42 @@ BEGIN
     LTEXT           "Rate Limit:", IDC_MB_RATE_LIMIT_LABEL, 185, 36, 35, 8
     EDITTEXT        IDC_MB_RATE_LIMIT, 223, 34, 25, 12, ES_NUMBER
 
-    GROUPBOX        "Cache", IDC_GROUP_CACHE, 7, 67, 306, 38
-    AUTOCHECKBOX    "Enable", IDC_ENABLE_CACHE, 14, 80, 45, 10
-    LTEXT           "Expiration (days):", IDC_CACHE_EXPIRATION_LABEL, 65, 81, 60, 8
-    EDITTEXT        IDC_CACHE_EXPIRATION, 130, 79, 35, 12, ES_NUMBER
-    LTEXT           "Max (MB):", IDC_CACHE_SIZE_LABEL, 175, 81, 35, 8
-    EDITTEXT        IDC_CACHE_SIZE, 215, 79, 35, 12, ES_NUMBER
-    AUTOCHECKBOX    "Auto Cleanup", IDC_AUTO_CLEANUP, 14, 95, 60, 10
-    PUSHBUTTON      "Clear Cache", IDC_CLEAR_CACHE_BTN_PREF, 235, 93, 55, 12
+    GROUPBOX        "Worker", IDC_GROUP_WORKER, 7, 67, 306, 28
+    AUTOCHECKBOX    "Auto Restart", IDC_AUTO_RESTART, 14, 80, 60, 10
+    PUSHBUTTON      "Restart Workers", IDC_RESTART_WORKERS_BTN, 80, 78, 75, 12
+    LTEXT           "", IDC_WORKER_STATUS_TEXT, 160, 80, 145, 8, SS_SUNKEN
 
-    GROUPBOX        "Logging", IDC_GROUP_LOGGING, 7, 110, 306, 28
-    LTEXT           "Level:", IDC_LOG_LEVEL_LABEL, 14, 123, 22, 8
-    COMBOBOX        IDC_LOG_LEVEL, 40, 121, 55, 100, CBS_DROPDOWN | WS_VSCROLL | WS_TABSTOP
-    LTEXT           "Max Size (MB):", IDC_LOG_SIZE_LABEL, 105, 123, 50, 8
-    EDITTEXT        IDC_LOG_SIZE, 160, 121, 35, 12, ES_NUMBER
-    PUSHBUTTON      "Open Log Folder", IDC_OPEN_LOG_BTN, 210, 121, 70, 12
+    GROUPBOX        "TaskQueue", IDC_GROUP_TASKQUEUE, 7, 100, 306, 28
+    LTEXT           "Batch Size:", IDC_TASKQUEUE_BATCH_LABEL, 14, 113, 40, 8
+    EDITTEXT        IDC_TASKQUEUE_BATCH_SIZE, 58, 111, 30, 12, ES_NUMBER
+    LTEXT           "Concurrency:", IDC_CONCURRENCY_LABEL_PREF, 100, 113, 50, 8
+    EDITTEXT        IDC_CONCURRENCY_PREF, 155, 111, 30, 12, ES_NUMBER
+    AUTOCHECKBOX    "Show Progress", IDC_SHOW_PROGRESS_PREF, 200, 113, 70, 10
 
-    GROUPBOX        "Worker", IDC_GROUP_WORKER, 7, 143, 306, 28
-    AUTOCHECKBOX    "Auto Restart", IDC_AUTO_RESTART, 14, 156, 60, 10
-    PUSHBUTTON      "Restart Workers", IDC_RESTART_WORKERS_BTN, 80, 154, 75, 12
-    LTEXT           "", IDC_WORKER_STATUS_TEXT, 160, 156, 145, 8, SS_SUNKEN
+    LTEXT           "Tip: Tune batch size and concurrency to balance speed and API rate limits.", IDC_STATIC, 7, 135, 306, 16
+END
 
-    GROUPBOX        "TaskQueue", IDC_GROUP_TASKQUEUE, 7, 176, 306, 28
-    LTEXT           "Batch Size:", IDC_TASKQUEUE_BATCH_LABEL, 14, 189, 40, 8
-    EDITTEXT        IDC_TASKQUEUE_BATCH_SIZE, 58, 187, 30, 12, ES_NUMBER
-    LTEXT           "Concurrency:", IDC_CONCURRENCY_LABEL_PREF, 100, 189, 50, 8
-    EDITTEXT        IDC_CONCURRENCY_PREF, 155, 187, 30, 12, ES_NUMBER
-    AUTOCHECKBOX    "Show Progress", IDC_SHOW_PROGRESS_PREF, 200, 189, 70, 10
+IDD_PREF_CACHE_LOGS DIALOGEX 0, 0, 320, 180
+STYLE DS_SETFONT | DS_FIXEDSYS | WS_CHILD | WS_VISIBLE
+FONT 8, "MS Shell Dlg"
+BEGIN
+    GROUPBOX        "Cache", IDC_GROUP_CACHE, 7, 7, 306, 50
+    AUTOCHECKBOX    "Enable", IDC_ENABLE_CACHE, 14, 20, 45, 10
+    LTEXT           "Expiration (days):", IDC_CACHE_EXPIRATION_LABEL, 65, 21, 60, 8
+    EDITTEXT        IDC_CACHE_EXPIRATION, 130, 19, 35, 12, ES_NUMBER
+    LTEXT           "Max (MB):", IDC_CACHE_SIZE_LABEL, 175, 21, 35, 8
+    EDITTEXT        IDC_CACHE_SIZE, 215, 19, 35, 12, ES_NUMBER
+    AUTOCHECKBOX    "Auto Cleanup", IDC_AUTO_CLEANUP, 14, 38, 60, 10
+    PUSHBUTTON      "Clear Cache", IDC_CLEAR_CACHE_BTN_PREF, 235, 36, 55, 12
+
+    GROUPBOX        "Logging", IDC_GROUP_LOGGING, 7, 65, 306, 35
+    LTEXT           "Level:", IDC_LOG_LEVEL_LABEL, 14, 80, 22, 8
+    COMBOBOX        IDC_LOG_LEVEL, 40, 78, 70, 100, CBS_DROPDOWN | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "Max Size (MB):", IDC_LOG_SIZE_LABEL, 120, 80, 50, 8
+    EDITTEXT        IDC_LOG_SIZE, 175, 78, 35, 12, ES_NUMBER
+    PUSHBUTTON      "Open Log Folder", IDC_OPEN_LOG_BTN, 220, 78, 70, 12
+
+    LTEXT           "Tip: Use 'Clear Cache' when you change provider/model and want fresh AI results. Logs are at profile/foo_metadata_enhancer/logs/.", IDC_STATIC, 7, 110, 306, 24
 END
 
 IDD_PREF_PROMPTS DIALOGEX 0, 0, 320, 290
@@ -216,22 +225,32 @@ BEGIN
     LTEXT           "Tokens Used:", IDC_STATIC, 14, 108, 60, 8
     LTEXT           "", IDC_TOKENS_USED, 80, 108, 80, 8
     LTEXT           "", IDC_DETAILS_LABEL, 14, 122, 240, 8
+    EDITTEXT        IDC_DETAILS_EDIT, 14, 140, 252, 35, ES_MULTILINE | ES_READONLY | WS_VSCROLL | NOT WS_VISIBLE
     DEFPUSHBUTTON   "OK", IDOK, 160, 179, 50, 14
     PUSHBUTTON      "View Details", IDVIEWDETAILS, 100, 179, 50, 14
 END
 
-IDD_ERROR DIALOGEX 0, 0, 300, 180
+IDD_ERROR DIALOGEX 0, 0, 420, 280
 STYLE DS_SETFONT | DS_MODALFRAME | DS_FIXEDSYS | WS_POPUP | WS_CAPTION | WS_SYSMENU
-CAPTION "Error"
+CAPTION "AI Metadata - Error"
 FONT 8, "MS Shell Dlg"
 BEGIN
-    GROUPBOX        "Error Details", IDC_GROUP_ERROR, 7, 7, 286, 120
-    LTEXT           "", IDC_ERROR_TITLE, 14, 20, 266, 16, SS_NOPREFIX
-    LTEXT           "", IDC_ERROR_MESSAGE, 14, 40, 266, 40
-    EDITTEXT        IDC_ERROR_DETAILS, 14, 84, 266, 36, ES_MULTILINE | ES_READONLY | WS_VSCROLL
-    DEFPUSHBUTTON   "Retry", IDC_RETRY_BTN, 100, 159, 50, 14
-    PUSHBUTTON      "View Log", IDC_VIEW_LOG_BTN, 160, 159, 50, 14
-    PUSHBUTTON      "Cancel", IDCANCEL, 220, 159, 50, 14
+    GROUPBOX        "Error Details", IDC_GROUP_ERROR, 7, 7, 406, 244
+    CONTROL         "", IDC_ERROR_ICON, "Static", 0x00000003, 14, 20, 32, 32
+    LTEXT           "", IDC_ERROR_CATEGORY, 52, 22, 350, 14, SS_NOPREFIX
+    LTEXT           "", IDC_ERROR_TITLE, 52, 38, 350, 18, SS_NOPREFIX
+    LTEXT           "Message:", IDC_STATIC, 14, 60, 60, 10
+    LTEXT           "", IDC_ERROR_MESSAGE, 78, 60, 328, 30
+    LTEXT           "Suggested fix:", IDC_STATIC, 14, 96, 60, 10
+    EDITTEXT        IDC_ERROR_SUGGESTION, 78, 94, 328, 40, ES_MULTILINE | ES_READONLY | WS_VSCROLL
+    LTEXT           "Technical details:", IDC_STATIC, 14, 142, 60, 10
+    EDITTEXT        IDC_ERROR_DETAILS, 78, 140, 328, 60, ES_MULTILINE | ES_READONLY | WS_VSCROLL | WS_BORDER
+    LTEXT           "", IDC_DETAILS_TEXT, 14, 206, 392, 36, SS_NOPREFIX
+    DEFPUSHBUTTON   "Retry", IDC_RETRY_BTN, 100, 257, 60, 14
+    PUSHBUTTON      "View Log", IDC_VIEW_LOG_BTN, 168, 257, 60, 14
+    PUSHBUTTON      "Open Settings", IDC_OPEN_SETTINGS_BTN, 236, 257, 70, 14
+    PUSHBUTTON      "Copy", IDC_COPY_ERROR_BTN, 312, 257, 40, 14
+    PUSHBUTTON      "Cancel", IDCANCEL, 358, 257, 50, 14
 END
 
 IDD_CACHE_STATS DIALOGEX 0, 0, 280, 220
@@ -294,37 +313,29 @@ BEGIN
     PUSHBUTTON      "Cancel", IDCANCEL, 170, 129, 50, 14
 END
 
-IDD_SCRAPING_OPTIONS DIALOGEX 0, 0, 320, 180
+IDD_SCRAPING_OPTIONS DIALOGEX 0, 0, 320, 130
 STYLE DS_SETFONT | DS_MODALFRAME | DS_FIXEDSYS | WS_POPUP | WS_CAPTION | WS_SYSMENU
-CAPTION "Stage 1: Scraping Options"
+CAPTION "Scraping Options"
 FONT 8, "MS Shell Dlg"
 BEGIN
-    GROUPBOX        "Data Sources (Priority Order)", IDC_STATIC, 7, 7, 306, 40
-    AUTOCHECKBOX    "MusicBrainz", IDC_ENABLE_MUSICBRAINZ, 14, 20, 70, 10
-    AUTOCHECKBOX    "Discogs", IDC_ENABLE_DISCOGS, 100, 20, 60, 10
-    AUTOCHECKBOX    "AI (Fallback)", IDC_ENABLE_AI, 170, 20, 70, 10
-    
-    GROUPBOX        "Confidence Thresholds", IDC_STATIC, 7, 52, 306, 45
-    LTEXT           "Auto Accept:", IDC_STATIC, 14, 67, 55, 8
-    EDITTEXT        IDC_AUTO_ACCEPT_THRESHOLD, 75, 65, 40, 14, WS_DISABLED
-    LTEXT           "Confirm Below:", IDC_STATIC, 130, 67, 55, 8
-    EDITTEXT        IDC_CONFIRM_THRESHOLD, 190, 65, 40, 14
-    
-    LTEXT           "AI will fetch all available fields. Select which fields to write in the confirmation dialog.", IDC_STATIC, 7, 110, 306, 20
-    
-    DEFPUSHBUTTON   "Start Scraping", IDOK, 100, 159, 80, 14
-    PUSHBUTTON      "Cancel", IDCANCEL, 190, 159, 50, 14
+    LTEXT           "Metadata is fetched primarily from MusicBrainz and Discogs.", IDC_STATIC, 7, 12, 306, 10
+    LTEXT           "When the available fields are not fully covered, AI will be used as fallback to fill the gaps.", IDC_STATIC, 7, 25, 306, 20
+    LTEXT           "Select which fields to write in the confirmation dialog.", IDC_STATIC, 7, 50, 306, 15
+    LTEXT           "Data sources can be toggled in Preferences.", IDC_STATIC, 7, 70, 306, 15
+
+    DEFPUSHBUTTON   "Start Scraping", IDOK, 100, 105, 80, 14
+    PUSHBUTTON      "Cancel", IDCANCEL, 190, 105, 50, 14
 END
 
 IDD_ENHANCEMENT_OPTIONS DIALOGEX 0, 0, 280, 140
 STYLE DS_SETFONT | DS_MODALFRAME | DS_FIXEDSYS | WS_POPUP | WS_CAPTION | WS_SYSMENU
-CAPTION "Stage 2: Enhancement Options"
+CAPTION "Enhancement Options"
 FONT 8, "MS Shell Dlg"
 BEGIN
     LTEXT           "AI will translate metadata to Chinese:", IDC_STATIC, 7, 7, 266, 15
     LTEXT           "- Title, Album, Artist will be translated to Chinese", IDC_STATIC, 14, 25, 250, 10
     LTEXT           "- Tracks already in Chinese will be skipped automatically", IDC_STATIC, 14, 38, 250, 10
-    LTEXT           "Note: Genre is sourced from MusicBrainz in Stage 1 (Scrape).", IDC_STATIC, 14, 55, 250, 10
+    LTEXT           "Note: Genre is sourced from MusicBrainz in Scrape.", IDC_STATIC, 14, 55, 250, 10
     LTEXT           "Select which fields to write in the confirmation dialog.", IDC_STATIC, 7, 70, 266, 15
 
     DEFPUSHBUTTON   "Start Enhancement", IDOK, 90, 119, 80, 14
@@ -363,7 +374,7 @@ CAPTION "Normalize - Confirm Groups"
 FONT 8, "MS Shell Dlg"
 BEGIN
     LTEXT           "Review AI suggested canonical names. Check groups to apply. Double-click ANY row (group or uncertain) to edit.", IDC_NORMALIZE_TOP_HINT, 7, 7, 586, 15
-    CONTROL         "", IDC_NORMALIZE_CONFIRM_LIST, "SysListView32", LVS_REPORT | LVS_SHOWSELALWAYS | WS_BORDER | WS_TABSTOP, 7, 25, 586, 340
+    CONTROL         "", IDC_NORMALIZE_CONFIRM_LIST, "SysListView32", LVS_REPORT | LVS_OWNERDATA | LVS_SHOWSELALWAYS | WS_BORDER | WS_TABSTOP, 7, 25, 586, 340
     PUSHBUTTON      "Select All", IDC_NORMALIZE_SELECT_ALL, 7, 370, 60, 14
     PUSHBUTTON      "Select None", IDC_NORMALIZE_SELECT_NONE, 72, 370, 60, 14
     GROUPBOX        "Uncertain Aliases (double-click to confirm as a group, then it will be applied)", IDC_NORMALIZE_UNCERTAIN_GROUP, 7, 388, 586, 35
@@ -400,7 +411,7 @@ BEGIN
     PUSHBUTTON      "Cancel", IDCANCEL, 305, 185, 50, 14
 END
 
-IDD_CONFIRM_RESULT DIALOGEX 0, 0, 600, 450
+IDD_CONFIRM_RESULT DIALOGEX 0, 0, 600, 470
 STYLE DS_SETFONT | DS_MODALFRAME | DS_FIXEDSYS | WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME
 CAPTION "Confirm Scraping Results"
 FONT 8, "MS Shell Dlg"
@@ -421,15 +432,18 @@ BEGIN
     AUTOCHECKBOX    "Country", IDC_FIELD_COUNTRY, 60, 36, 50, 10
     AUTOCHECKBOX    "Catalog#", IDC_FIELD_CATALOG_NUMBER, 118, 36, 55, 10
 
-    CONTROL         "", IDC_RESULT_LISTVIEW, "SysListView32", LVS_REPORT | WS_BORDER | WS_TABSTOP, 7, 70, 586, 280
-    PUSHBUTTON      "Select All", IDC_SELECT_ALL, 7, 360, 60, 14
-    PUSHBUTTON      "Select None", IDC_SELECT_NONE, 75, 360, 60, 14
-    PUSHBUTTON      "Select Success", IDC_SELECT_SUCCESS, 143, 360, 70, 14
-    PUSHBUTTON      "Edit Selected", IDC_EDIT_ITEM, 223, 360, 60, 14
-    LTEXT           "Double-click an item to edit", IDC_HINT_DOUBLE_CLICK, 300, 363, 150, 8
-    DEFPUSHBUTTON   "Apply Selected", IDOK, 400, 425, 80, 14
-    PUSHBUTTON      "Cancel", IDCANCEL, 490, 425, 50, 14
-    LTEXT           "Checked items will be written to tags", IDC_HINT_CHECKED, 7, 428, 200, 8
+    CONTROL         "", IDC_RESULT_LISTVIEW, "SysListView32", LVS_REPORT | LVS_OWNERDATA | WS_BORDER | WS_TABSTOP, 7, 70, 586, 290
+    AUTOCHECKBOX    "Hide confidence (0-100)  <", IDC_FILTER_LOW_CONF, 7, 366, 110, 10
+    EDITTEXT        IDC_CONF_THRESHOLD, 115, 364, 35, 12, ES_AUTOHSCROLL | ES_NUMBER
+    PUSHBUTTON      "Sort by Confidence", IDC_SORT_CONF, 160, 363, 90, 14
+    PUSHBUTTON      "Select All", IDC_SELECT_ALL, 265, 363, 55, 14
+    PUSHBUTTON      "Select None", IDC_SELECT_NONE, 325, 363, 55, 14
+    PUSHBUTTON      "Select Success", IDC_SELECT_SUCCESS, 385, 363, 65, 14
+    PUSHBUTTON      "Edit Selected", IDC_EDIT_ITEM, 455, 363, 55, 14
+    LTEXT           "Double-click to edit", IDC_HINT_DOUBLE_CLICK, 520, 366, 70, 8
+    DEFPUSHBUTTON   "Apply Selected", IDOK, 400, 445, 80, 14
+    PUSHBUTTON      "Cancel", IDCANCEL, 490, 445, 50, 14
+    LTEXT           "Checked items will be written to tags", IDC_HINT_CHECKED, 7, 448, 200, 8
 END
 
 IDD_EDIT_FIELD DIALOGEX 0, 0, 300, 145
@@ -461,7 +475,7 @@ BEGIN
     AUTOCHECKBOX    "Album_ZH", IDC_ENHANCE_FIELD_ALBUM_ZH, 75, 20, 58, 10
     AUTOCHECKBOX    "Artist_ZH", IDC_ENHANCE_FIELD_ARTIST_ZH, 140, 20, 58, 10
 
-    CONTROL         "", IDC_ENHANCE_LISTVIEW, "SysListView32", LVS_REPORT | WS_BORDER | WS_TABSTOP, 7, 50, 586, 300
+    CONTROL         "", IDC_ENHANCE_LISTVIEW, "SysListView32", LVS_REPORT | LVS_OWNERDATA | WS_BORDER | WS_TABSTOP, 7, 50, 586, 300
     PUSHBUTTON      "Select All", IDC_SELECT_ALL, 7, 360, 60, 14
     PUSHBUTTON      "Select None", IDC_SELECT_NONE, 75, 360, 60, 14
     PUSHBUTTON      "Select Success", IDC_SELECT_SUCCESS, 143, 360, 70, 14

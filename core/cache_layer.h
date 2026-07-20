@@ -11,7 +11,7 @@ struct sqlite3;
 
 namespace ai_metadata {
 
-struct Stage1CacheEntry {
+struct ScrapeCacheEntry {
     std::string track_id;
     std::string file_path;
     std::string title;
@@ -24,7 +24,7 @@ struct Stage1CacheEntry {
     std::string error_message;
 };
 
-struct Stage2CacheEntry {
+struct EnhanceCacheEntry {
     std::string track_id;
     std::string file_path;
     std::string title;
@@ -63,11 +63,11 @@ public:
     CacheLayer(const CacheLayer&) = delete;
     CacheLayer& operator=(const CacheLayer&) = delete;
     
-    std::optional<Stage1CacheEntry> get_stage1(const std::string& cache_key);
-    void set_stage1(const std::string& cache_key, const Stage1CacheEntry& entry);
-    
-    std::optional<Stage2CacheEntry> get_stage2(const std::string& cache_key);
-    void set_stage2(const std::string& cache_key, const Stage2CacheEntry& entry);
+    std::optional<ScrapeCacheEntry> get_scrape(const std::string& cache_key);
+    void set_scrape(const std::string& cache_key, const ScrapeCacheEntry& entry);
+
+    std::optional<EnhanceCacheEntry> get_enhance(const std::string& cache_key);
+    void set_enhance(const std::string& cache_key, const EnhanceCacheEntry& entry);
     
     /**
      * @brief 清除所有缓存条目
@@ -125,12 +125,12 @@ public:
     static std::string generate_cache_key(const TrackInput& input);
     
     /**
-     * @brief 生成Stage2缓存键（包含增强选项）
+     * @brief 生成 Enhance 缓存键（包含增强选项）
      * @param input 音轨输入信息
      * @param options 增强选项
      * @return 缓存键字符串
      */
-    static std::string generate_stage2_cache_key(const TrackInput& input, const EnhancementOptions& options);
+    static std::string generate_enhance_cache_key(const TrackInput& input, const EnhancementOptions& options);
     
     /**
      * @brief 生成音轨唯一标识符

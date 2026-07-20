@@ -121,6 +121,7 @@ set(PLUGIN_SOURCES
     plugin/dialogs.cpp
     plugin/confirm_dialog.cpp
     plugin/backup_manager.cpp
+    plugin/feedback.cpp
     ${PROJECT_SOURCE_DIR}/foo_metadata_enhancer.rc
     ${PFC_SOURCES}
     ${SDK_SOURCES}
@@ -202,8 +203,10 @@ if(FOOBAR_DEV_DIR)
     file(MAKE_DIRECTORY "${PLUGIN_DIR}/logs")
     file(MAKE_DIRECTORY "${PLUGIN_DIR}/worker")
 
-    # 部署Python Worker脚本
+    # 部署Python Worker脚本（先清空目标目录，确保旧文件不残留）
     add_custom_command(TARGET foo_metadata_enhancer POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E rm -rf "${PLUGIN_DIR}/worker"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${PLUGIN_DIR}/worker"
         COMMAND ${CMAKE_COMMAND} -E copy_directory
             "${PROJECT_SOURCE_DIR}/worker"
             "${PLUGIN_DIR}/worker"

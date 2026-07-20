@@ -160,6 +160,8 @@ class OpenAIProvider(BaseAIProvider):
 
         for attempt in range(self.config.max_retries):
             try:
+                if attempt > 0:
+                    logger.info(f"Provider retry attempt {attempt + 1}/{self.config.max_retries} for model={model}")
                 data = json.dumps(payload).encode('utf-8')
                 req = urllib.request.Request(
                     url, data=data, headers=headers, method='POST'
@@ -233,6 +235,7 @@ class OpenAIProvider(BaseAIProvider):
             except socket.timeout:
                 error_msg = f"Request timeout after {self.config.timeout_ms * 2}ms"
                 logger.warning(f"Timeout on attempt {attempt + 1}/{self.config.max_retries}: {error_msg}")
+                logger.info(f"Provider will retry after {self.config.retry_delay_ms * (2 ** attempt) / 1000:.1f}s backoff")
                 if attempt < self.config.max_retries - 1:
                     delay = self.config.retry_delay_ms * (2 ** attempt) / 1000
                     time.sleep(delay)
@@ -394,6 +397,8 @@ class OpenAIProvider(BaseAIProvider):
 
         for attempt in range(self.config.max_retries):
             try:
+                if attempt > 0:
+                    logger.info(f"Provider retry attempt {attempt + 1}/{self.config.max_retries} for model={model}")
                 data = json.dumps(payload).encode('utf-8')
                 req = urllib.request.Request(
                     self.base_url,
@@ -466,6 +471,7 @@ class OpenAIProvider(BaseAIProvider):
             except socket.timeout:
                 error_msg = f"Request timeout after {self.config.timeout_ms}ms"
                 logger.warning(f"Timeout on attempt {attempt + 1}/{self.config.max_retries}: {error_msg}")
+                logger.info(f"Provider will retry after {self.config.retry_delay_ms * (2 ** attempt) / 1000:.1f}s backoff")
                 if attempt < self.config.max_retries - 1:
                     delay = self.config.retry_delay_ms * (2 ** attempt) / 1000
                     time.sleep(delay)

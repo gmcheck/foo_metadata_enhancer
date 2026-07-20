@@ -565,7 +565,7 @@ class EnhancementOptions:
     """增强选项 - 阶段二（仅翻译；genre/edition 已废弃）
 
     V8.2：classify_genre / identify_edition 已移除。
-    - genre 改由 Stage1 从 MusicBrainz 抓取
+    - genre 改由 Scrape 从 MusicBrainz 抓取
     - edition 已废弃（AI 推断不可靠）
     保留 from_dict/to_dict 中对这两个字段的兼容读取（忽略），便于老配置文件平滑过渡。
     """

@@ -2,6 +2,7 @@
 #include "menu_handler.h"
 #include "resource.h"
 #include "../core/logger.h"
+#include "../core/feedback.h"
 #include "../core/ai_core.h"
 #include "../core/worker_manager.h"
 #include "../include/constants.h"
@@ -45,13 +46,18 @@ static const GUID guid_preferences_data_sources =
     { 0x7a8b9c0f, 0x1e2f, 0x3a4b, { 0x5c, 0x6d, 0x7e, 0x8f, 0x9a, 0x0b, 0x1c, 0x2d } };
 static const GUID guid_preferences_advanced =
     { 0x7a8b9c10, 0x1e2f, 0x3a4b, { 0x5c, 0x6d, 0x7e, 0x8f, 0x9a, 0x0b, 0x1c, 0x2d } };
+static const GUID guid_preferences_processing =
+    { 0x7a8b9c12, 0x1e2f, 0x3a4b, { 0x5c, 0x6d, 0x7e, 0x8f, 0x9a, 0x0b, 0x1c, 0x2d } };
+static const GUID guid_preferences_cache_logs =
+    { 0x7a8b9c13, 0x1e2f, 0x3a4b, { 0x5c, 0x6d, 0x7e, 0x8f, 0x9a, 0x0b, 0x1c, 0x2d } };
 static const GUID guid_preferences_prompts =
     { 0x7a8b9c11, 0x1e2f, 0x3a4b, { 0x5c, 0x6d, 0x7e, 0x8f, 0x9a, 0x0b, 0x1c, 0x2d } };
 
 const GUID AIPreferencePageRoot::g_guid = guid_preferences_root;
 const GUID AIPreferencePageGeneral::g_guid = guid_preferences_general;
 const GUID AIPreferencePageDataSources::g_guid = guid_preferences_data_sources;
-const GUID AIPreferencePageAdvanced::g_guid = guid_preferences_advanced;
+const GUID AIPreferencePageProcessing::g_guid = guid_preferences_processing;
+const GUID AIPreferencePageCacheLogs::g_guid = guid_preferences_cache_logs;
 const GUID AIPreferencePagePrompts::g_guid = guid_preferences_prompts;
 
 SettingsManager& SettingsManager::instance() {
@@ -1089,20 +1095,36 @@ preferences_page_instance::ptr AIPreferencePageDataSources::instantiate(HWND par
     return new service_impl_t<AIPreferencePageInstance>(parent, callback, IDD_PREF_DATA_SOURCES);
 }
 
-const char* AIPreferencePageAdvanced::get_name() {
-    return "Advanced";
+const char* AIPreferencePageProcessing::get_name() {
+    return "Processing";
 }
 
-GUID AIPreferencePageAdvanced::get_guid() {
+GUID AIPreferencePageProcessing::get_guid() {
     return g_guid;
 }
 
-GUID AIPreferencePageAdvanced::get_parent_guid() {
+GUID AIPreferencePageProcessing::get_parent_guid() {
     return guid_preferences_root;
 }
 
-preferences_page_instance::ptr AIPreferencePageAdvanced::instantiate(HWND parent, preferences_page_callback::ptr callback) {
-    return new service_impl_t<AIPreferencePageInstance>(parent, callback, IDD_PREF_ADVANCED);
+preferences_page_instance::ptr AIPreferencePageProcessing::instantiate(HWND parent, preferences_page_callback::ptr callback) {
+    return new service_impl_t<AIPreferencePageInstance>(parent, callback, IDD_PREF_PROCESSING);
+}
+
+const char* AIPreferencePageCacheLogs::get_name() {
+    return "Cache & Logs";
+}
+
+GUID AIPreferencePageCacheLogs::get_guid() {
+    return g_guid;
+}
+
+GUID AIPreferencePageCacheLogs::get_parent_guid() {
+    return guid_preferences_root;
+}
+
+preferences_page_instance::ptr AIPreferencePageCacheLogs::instantiate(HWND parent, preferences_page_callback::ptr callback) {
+    return new service_impl_t<AIPreferencePageInstance>(parent, callback, IDD_PREF_CACHE_LOGS);
 }
 
 const char* AIPreferencePagePrompts::get_name() {
@@ -1118,12 +1140,20 @@ GUID AIPreferencePagePrompts::get_parent_guid() {
 }
 
 preferences_page_instance::ptr AIPreferencePagePrompts::instantiate(HWND parent, preferences_page_callback::ptr callback) {
+    Logger::instance().info("[PrefPage] AIPreferencePagePrompts::instantiate called, IDD_PREF_PROMPTS=" + std::to_string(IDD_PREF_PROMPTS));
     return new service_impl_t<AIPreferencePageInstance>(parent, callback, IDD_PREF_PROMPTS);
 }
 
 AIPreferencePageInstance::AIPreferencePageInstance(HWND parent, preferences_page_callback::ptr callback, int dialog_id)
     : m_callback(callback), m_modified(false), m_dialog_id(dialog_id) {
+    Logger::instance().info("[PrefPage] Constructor ENTER, dialog_id=" + std::to_string(dialog_id) + ", parent=" + std::to_string(reinterpret_cast<uintptr_t>(parent)));
     m_settings = SettingsManager::instance().settings();
+
+    // 先验证资源是否存在
+    HRSRC hRes = FindResource(core_api::get_my_instance(), MAKEINTRESOURCE(dialog_id), RT_DIALOG);
+    Logger::instance().info("[PrefPage] FindResource: dialog_id=" + std::to_string(dialog_id) + ", hRes=" + std::to_string(reinterpret_cast<uintptr_t>(hRes)) + ", err=" + std::to_string(GetLastError()));
+
+    SetLastError(0);
     m_wnd = CreateDialogParam(
         core_api::get_my_instance(),
         MAKEINTRESOURCE(dialog_id),
@@ -1131,6 +1161,8 @@ AIPreferencePageInstance::AIPreferencePageInstance(HWND parent, preferences_page
         dialog_proc,
         reinterpret_cast<LPARAM>(this)
     );
+    DWORD err = GetLastError();
+    Logger::instance().info("[PrefPage] Constructor EXIT, dialog_id=" + std::to_string(dialog_id) + ", m_wnd=" + std::to_string(reinterpret_cast<uintptr_t>(m_wnd)) + ", err=" + std::to_string(err));
 }
 
 AIPreferencePageInstance::~AIPreferencePageInstance() {
@@ -1152,11 +1184,15 @@ t_uint32 AIPreferencePageInstance::get_state() {
 }
 
 void AIPreferencePageInstance::apply() {
-    auto old_log_level = SettingsManager::instance().settings().log_level;
+    auto old_settings = SettingsManager::instance().settings();
+    auto old_log_level = old_settings.log_level;
+    auto old_provider = old_settings.provider;
+    auto old_provider_configs = old_settings.provider_configs;
+
     save_settings();
     SettingsManager::instance().settings() = m_settings;
     SettingsManager::instance().save();
-    
+
     AICore* ai_core = get_ai_core_instance();
     if (ai_core) {
         ai_core->set_config("expiration_days", std::to_string(m_settings.cache_expiration_days));
@@ -1164,14 +1200,56 @@ void AIPreferencePageInstance::apply() {
         ai_core->set_config("auto_cleanup", m_settings.auto_cleanup ? "true" : "false");
         ai_core->set_taskqueue_batch_size(m_settings.taskqueue_batch_size);
         ai_core->set_ai_batch_size(m_settings.ai_batch_size);
-        
+        // 同步 cache_enabled 到 AICore，否则 UI 改了但 AICore 仍用旧值会导致缓存继续写入
+        ai_core->set_cache_enabled(m_settings.cache_enabled);
+
         // 日志级别变更时，动态通知Python worker（无需重启）
         if (m_settings.log_level != old_log_level) {
             std::string level_name = constants::log_level_to_string(m_settings.log_level);
             ai_core->update_worker_log_level(level_name);
         }
+
+        // 检测 provider 或 api_key 或 selected_model 是否变更。
+        // 若变更则强制重启 Worker，让新配置在全新进程中生效。
+        // 不用 reload 是因为 ScrapeProcessor/AIResolver 等对象在请求处理时
+        // 才创建，但已缓存的 Provider 实例不会刷新，行为不可预测。
+        bool provider_changed = (m_settings.provider != old_provider);
+        bool api_key_or_model_changed = false;
+        for (const auto& [p, cfg] : m_settings.provider_configs) {
+            auto it = old_provider_configs.find(p);
+            if (it == old_provider_configs.end()) {
+                api_key_or_model_changed = true;
+                break;
+            }
+            if (cfg.api_key != it->second.api_key ||
+                cfg.selected_model != it->second.selected_model) {
+                api_key_or_model_changed = true;
+                break;
+            }
+        }
+
+        if (provider_changed || api_key_or_model_changed) {
+            Logger::instance().info("apply: provider/api_key/model changed, restarting worker",
+                                    __FILE__, __FUNCTION__);
+            // 异步重启 worker：restart_all_workers 内部会调 WaitForSingleObject
+            // 等待 worker 进程退出（最长 1 秒），如果在 UI 线程同步执行会与
+            // worker_read_loop 线程争抢 worker_mutex_ 导致 fb2k UI 卡死。
+            std::thread([ai_core]() {
+                try {
+                    ai_core->restart_all_workers();
+                    Logger::instance().info("apply: worker restart completed",
+                                            __FILE__, __FUNCTION__);
+                } catch (const std::exception& e) {
+                    Logger::instance().error(std::string("apply: worker restart failed: ") + e.what(),
+                                             __FILE__, __FUNCTION__);
+                } catch (...) {
+                    Logger::instance().error("apply: worker restart failed: unknown exception",
+                                             __FILE__, __FUNCTION__);
+                }
+            }).detach();
+        }
     }
-    
+
     m_modified = false;
     m_callback->on_state_changed();
 }
@@ -1184,11 +1262,12 @@ void AIPreferencePageInstance::reset() {
 
 INT_PTR CALLBACK AIPreferencePageInstance::dialog_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
     AIPreferencePageInstance* self = nullptr;
-    
+
     if (msg == WM_INITDIALOG) {
         self = reinterpret_cast<AIPreferencePageInstance*>(lp);
         SetWindowLongPtr(wnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
         self->m_wnd = wnd;
+        Logger::instance().info("[PrefPage] WM_INITDIALOG: wnd=" + std::to_string(reinterpret_cast<uintptr_t>(wnd)) + ", dialog_id=" + std::to_string(self->m_dialog_id));
         self->on_init_dialog();
         SetTimer(wnd, FILL_COMBO_TIMER_ID, FILL_COMBO_TIMER_DELAY, NULL);
         return TRUE;
@@ -1206,6 +1285,14 @@ INT_PTR CALLBACK AIPreferencePageInstance::dialog_proc(HWND wnd, UINT msg, WPARA
             break;
             
         case WM_SHOWWINDOW:
+            // 页面显示时确保 combo 框已填充（防御性：on_init_dialog 和 timer 可能因
+            // 消息时序问题未执行）
+            if (self) {
+                HWND tcombo = GetDlgItem(wnd, IDC_TRANSLATION_STYLE);
+                if (tcombo && SendMessageW(tcombo, CB_GETCOUNT, 0, 0) == 0) {
+                    self->fill_combo_boxes();
+                }
+            }
             return TRUE;
             
         case WM_FILL_COMBO_BOXES:
@@ -1310,6 +1397,18 @@ INT_PTR CALLBACK AIPreferencePageInstance::dialog_proc(HWND wnd, UINT msg, WPARA
 }
 
 void AIPreferencePageInstance::on_init_dialog() {
+    // 诊断日志：记录 dialog id 和关键控件句柄
+    {
+        char diag[256];
+        std::snprintf(diag, sizeof(diag),
+            "[PrefPage] on_init_dialog: dialog_id=%d wnd=%p IDC_TRANSLATION_STYLE=%p IDC_KEEP_ORIGINAL=%p",
+            m_dialog_id, (void*)m_wnd,
+            (void*)GetDlgItem(m_wnd, IDC_TRANSLATION_STYLE),
+            (void*)GetDlgItem(m_wnd, IDC_KEEP_ORIGINAL));
+        Logger::instance().info(diag);
+    }
+    // 同步填充 combo 框（确保控件在显示时已有数据）
+    fill_combo_boxes();
     update_controls();
 }
 
@@ -1324,6 +1423,16 @@ void AIPreferencePageInstance::fill_combo_boxes() {
         SendMessageW(combo, CB_INSERTSTRING, 4, (LPARAM)L"DeepSeek");
         SendMessageW(combo, CB_SETCURSEL, static_cast<int>(m_settings.provider), 0);
         update_model_combo();
+    }
+
+    // 诊断日志：记录 fill_combo_boxes 调用及关键控件句柄
+    {
+        char diag[256];
+        std::snprintf(diag, sizeof(diag),
+            "[PrefPage] fill_combo_boxes: wnd=%p IDC_PROVIDER=%p IDC_TRANSLATION_STYLE=%p",
+            (void*)m_wnd, (void*)GetDlgItem(m_wnd, IDC_PROVIDER),
+            (void*)GetDlgItem(m_wnd, IDC_TRANSLATION_STYLE));
+        Logger::instance().info(diag);
     }
     
     combo = GetDlgItem(m_wnd, IDC_LOG_LEVEL);
@@ -1352,7 +1461,11 @@ void AIPreferencePageInstance::fill_combo_boxes() {
     }
 
     // Note: IDC_GENRE_LANGUAGE removed - genre is now sourced from MusicBrainz
-    // (Stage1) in English, so the language selection is no longer applicable.
+    // (Scrape) in English, so the language selection is no longer applicable.
+
+    // combo 填充完毕后重新同步控件值（WM_INITDIALOG 时 update_controls 在 combo 填充前调用，
+    // 会导致 translation style 等 combo 显示空白）
+    update_controls();
 }
 
 void AIPreferencePageInstance::update_controls() {
@@ -1475,6 +1588,14 @@ void AIPreferencePageInstance::update_controls() {
 }
 
 void AIPreferencePageInstance::on_provider_changed() {
+    // 切换 provider 前必须先把当前输入框的 api_key 保存到旧 provider 的 config，
+    // 否则用户在旧 provider 输入的 api_key 会丢失。
+    if (GetDlgItem(m_wnd, IDC_API_KEY)) {
+        char buffer[512] = {0};
+        GetDlgItemTextA(m_wnd, IDC_API_KEY, buffer, sizeof(buffer));
+        m_settings.get_current_provider_config().api_key = buffer;
+    }
+
     HWND combo = GetDlgItem(m_wnd, IDC_PROVIDER);
     if (combo) {
         m_settings.provider = static_cast<AIProvider>(ComboBox_GetCurSel(combo));
@@ -1658,7 +1779,7 @@ void AIPreferencePageInstance::save_settings() {
             default: m_settings.prompt_prefs.translation_style = "official"; break;
         }
     }
-    // Note: IDC_GENRE_LANGUAGE removed - genre is now sourced from MusicBrainz (Stage1).
+    // Note: IDC_GENRE_LANGUAGE removed - genre is now sourced from MusicBrainz (Scrape).
     if (GetDlgItem(m_wnd, IDC_KEEP_ORIGINAL)) {
         m_settings.prompt_prefs.keep_original_when_uncertain = IsDlgButtonChecked(m_wnd, IDC_KEEP_ORIGINAL) == BST_CHECKED;
     }
@@ -1684,8 +1805,12 @@ void AIPreferencePageInstance::on_test_api() {
     if (m_test_in_progress) {
         return;
     }
-    
+
+    // test_api 不需要落盘 settings.json：直接用 UI 当前选择的 provider/model/api_key
+    // 通过 params 传给 Python，process_test_api 会用这些参数创建临时 provider 实例。
+    // 真正的配置生效发生在用户点 Apply 时（触发 worker 重启）。
     save_settings();
+
     std::string api_key = m_settings.get_current_provider_config().api_key;
     if (m_settings.use_env_key) {
         const char* env_key = std::getenv("OPENROUTER_API_KEY");
@@ -1694,7 +1819,7 @@ void AIPreferencePageInstance::on_test_api() {
     
     if (api_key.empty()) {
         SetDlgItemTextA(m_wnd, IDC_STATUS_TEXT, "[ERROR] No API key configured");
-        popup_message::g_show("Error: No API key configured. Please enter your API key.", "AI Metadata");
+        Feedback::warn("No API key configured. Please enter your API key in the AI Provider page.", "AI Metadata");
         return;
     }
     
@@ -1704,21 +1829,27 @@ void AIPreferencePageInstance::on_test_api() {
     AICore* ai_core = get_ai_core_instance();
     if (!ai_core) {
         SetDlgItemTextA(m_wnd, IDC_STATUS_TEXT, "[ERROR] AI Core not initialized");
-        popup_message::g_show("Error: AI Core not initialized. Please restart foobar2000.", "AI Metadata");
+        Feedback::error("AI Core not initialized",
+                         "AI Core instance is null. This usually indicates the plugin failed to start.",
+                         ErrorCategory::PythonWorker);
         return;
     }
     
     if (!ai_core->is_initialized()) {
-        // 设置数据库路径为 {fb2k_profile}/foo_metadata_enhancer.db
+        // 设置数据库路径为 {fb2k_profile}/foo_metadata_enhancer/foo_metadata_enhancer.db
         std::string profile_path = core_api::get_profile_path();
         if (profile_path.find("file://") == 0) {
             profile_path = profile_path.substr(7);
         }
-        ai_core->set_cache_path(profile_path + "\\" + constants::cache_db_name());
+        std::string sub_dir = profile_path + "\\foo_metadata_enhancer";
+        CreateDirectoryA(sub_dir.c_str(), NULL);
+        ai_core->set_cache_path(sub_dir + "\\" + constants::cache_db_name());
         SetDlgItemTextA(m_wnd, IDC_STATUS_TEXT, "[1/3] Initializing AI Core...");
         if (!ai_core->initialize()) {
             SetDlgItemTextA(m_wnd, IDC_STATUS_TEXT, "[ERROR] Failed to initialize AI Core");
-            popup_message::g_show("Error: Failed to initialize AI Core. Check Python installation.", "AI Metadata");
+            Feedback::error("Failed to initialize AI Core",
+                             "AI Core initialization failed. Check Python installation and worker path.",
+                             ErrorCategory::PythonWorker);
             return;
         }
     }
@@ -1762,7 +1893,7 @@ void AIPreferencePageInstance::on_test_api() {
                     }
                     
                     SetDlgItemTextA(wnd, IDC_STATUS_TEXT, "[3/3] API test: SUCCESS");
-                    popup_message::g_show(message.c_str(), "API Test Successful");
+                    Feedback::success(message);
                 } else {
                     std::string error_msg = "API connection failed!\n\n";
                     error_msg += "Provider: " + provider_name + "\n";
@@ -1773,48 +1904,45 @@ void AIPreferencePageInstance::on_test_api() {
                     }
                     
                     SetDlgItemTextA(wnd, IDC_STATUS_TEXT, "[3/3] API test: FAILED");
-                    popup_message::g_show(error_msg.c_str(), "API Test Failed");
+                    Feedback::warn(error_msg, "API Test Failed");
                 }
             } catch (const std::exception& e) {
                 std::string error_msg = "Failed to parse test result: ";
                 error_msg += e.what();
                 SetDlgItemTextA(wnd, IDC_STATUS_TEXT, "[3/3] API test: ERROR");
-                popup_message::g_show(error_msg.c_str(), "API Test Error");
+                Feedback::warn(error_msg, "API Test Error");
             }
         });
     }).detach();
 }
 
 void AIPreferencePageInstance::on_open_log_folder() {
-    // Use the same path as Logger (DLL directory, not profile path)
-    std::string dll_dir = get_dll_directory();
-    if (dll_dir.empty()) {
-        SetDlgItemTextA(m_wnd, IDC_WORKER_STATUS_TEXT, "Cannot find plugin directory");
+    // 复用 Logger 统一确定的日志路径（components/foo_metadata_enhancer/logs/core.log）
+    std::string log_file = Logger::instance().get_log_file_path();
+    if (log_file.empty()) {
+        SetDlgItemTextA(m_wnd, IDC_WORKER_STATUS_TEXT, "Cannot determine log file path");
         return;
     }
-    
-    std::string base_dir = dll_dir + "\\foo_metadata_enhancer";
-    std::string log_dir = base_dir + "\\logs";
-    std::string log_file = log_dir + "\\core.log";
-    
-    // Create intermediate directories (CreateDirectoryA only creates the leaf)
-    CreateDirectoryA(base_dir.c_str(), NULL);
-    CreateDirectoryA(log_dir.c_str(), NULL);
-    
+
     // Use explorer.exe /select to reliably open Explorer and select the log file
     int len = MultiByteToWideChar(CP_UTF8, 0, log_file.c_str(), -1, NULL, 0);
     std::wstring wlog_file(len, 0);
     MultiByteToWideChar(CP_UTF8, 0, log_file.c_str(), -1, &wlog_file[0], len);
-    
+
     std::wstring params = L"/select,\"" + wlog_file + L"\"";
     HINSTANCE result = ShellExecuteW(NULL, NULL, L"explorer.exe", params.c_str(), NULL, SW_SHOWNORMAL);
     
     if ((INT_PTR)result <= 32) {
         // Fallback: try opening the folder directly
-        len = MultiByteToWideChar(CP_UTF8, 0, log_dir.c_str(), -1, NULL, 0);
-        std::wstring wlog_dir(len, 0);
-        MultiByteToWideChar(CP_UTF8, 0, log_dir.c_str(), -1, &wlog_dir[0], len);
-        ShellExecuteW(NULL, L"open", wlog_dir.c_str(), NULL, NULL, SW_SHOWNORMAL);
+        std::string log_dir;
+        size_t slash = log_file.find_last_of("\\/");
+        if (slash != std::string::npos) log_dir = log_file.substr(0, slash);
+        if (!log_dir.empty()) {
+            len = MultiByteToWideChar(CP_UTF8, 0, log_dir.c_str(), -1, NULL, 0);
+            std::wstring wlog_dir(len, 0);
+            MultiByteToWideChar(CP_UTF8, 0, log_dir.c_str(), -1, &wlog_dir[0], len);
+            ShellExecuteW(NULL, L"open", wlog_dir.c_str(), NULL, NULL, SW_SHOWNORMAL);
+        }
     }
 }
 
@@ -1825,38 +1953,51 @@ void AIPreferencePageInstance::on_clear_cache() {
         L"Clear Cache",
         MB_YESNO | MB_ICONQUESTION
     );
-    
-    if (result == IDYES) {
-        std::string cache_path = core_api::get_profile_path();
-        if (cache_path.find("file://") == 0) {
-            cache_path = cache_path.substr(7);
-        }
-        cache_path += "\\";
-        cache_path += constants::cache_db_name();
 
-        if (DeleteFileA(cache_path.c_str())) {
-            SetDlgItemTextA(m_wnd, IDC_STATUS_TEXT, "Cache cleared successfully");
-            popup_message::g_show("Cache cleared successfully", "AI Metadata");
-        } else {
-            SetDlgItemTextA(m_wnd, IDC_STATUS_TEXT, "Cache was already empty or could not be cleared");
+    if (result == IDYES) {
+        AICore* ai_core = get_ai_core_instance();
+        if (!ai_core) {
+            SetDlgItemTextA(m_wnd, IDC_STATUS_TEXT, "[ERROR] AI Core not initialized");
+            Feedback::error("AI Core not initialized",
+                             "AI Core instance is null. This usually indicates the plugin failed to start.",
+                             ErrorCategory::PythonWorker);
+            return;
         }
+        ai_core->clear_cache();
+        SetDlgItemTextA(m_wnd, IDC_STATUS_TEXT, "Cache cleared successfully");
+        Feedback::success("Cache cleared successfully");
     }
 }
 
 void AIPreferencePageInstance::on_restart_workers() {
+    Logger::instance().info("on_restart_workers: ENTER", __FILE__, __FUNCTION__);
     AICore* ai_core = get_ai_core_instance();
     if (!ai_core) {
+        Logger::instance().error("on_restart_workers: ai_core is null", __FILE__, __FUNCTION__);
         SetDlgItemTextA(m_wnd, IDC_WORKER_STATUS_TEXT, "Core not initialized");
         return;
     }
-    
+    Logger::instance().info("on_restart_workers: ai_core=" + std::to_string((intptr_t)ai_core) +
+        ", is_initialized=" + std::string(ai_core->is_initialized() ? "true" : "false"), __FILE__, __FUNCTION__);
+
+    // AICore 是懒加载：只有执行过 scrape/enhance 后才会调用 initialize() 创建 WorkerManager。
+    // 未初始化时 worker_manager_ 为空，restart_all_workers() 会返回 false。
+    // 此时只在状态栏显示提示，不弹窗。
+    if (!ai_core->is_initialized()) {
+        Logger::instance().info("on_restart_workers: AICore not initialized yet, showing hint", __FILE__, __FUNCTION__);
+        SetDlgItemTextA(m_wnd, IDC_WORKER_STATUS_TEXT, "Status: Not started (run scrape/enhance first)");
+        return;
+    }
+
     SetDlgItemTextA(m_wnd, IDC_WORKER_STATUS_TEXT, "Restarting...");
-    
+
     bool success = ai_core->restart_all_workers();
-    
+    Logger::instance().info("on_restart_workers: restart_all_workers returned " + std::string(success ? "true" : "false"), __FILE__, __FUNCTION__);
+
     if (success) {
         // Check worker health after restart (restart is synchronous: stop + start)
         bool healthy = ai_core->is_worker_healthy();
+        Logger::instance().info("on_restart_workers: is_worker_healthy=" + std::string(healthy ? "true" : "false"), __FILE__, __FUNCTION__);
         if (healthy) {
             SetDlgItemTextA(m_wnd, IDC_WORKER_STATUS_TEXT, "Status: Running");
         } else {
@@ -1984,7 +2125,8 @@ void AIPreferencePageInstance::on_export_templates() {
 static preferences_page_factory_t<AIPreferencePageRoot> g_preferences_page_root_factory;
 static preferences_page_factory_t<AIPreferencePageGeneral> g_preferences_page_general_factory;
 static preferences_page_factory_t<AIPreferencePageDataSources> g_preferences_page_data_sources_factory;
-static preferences_page_factory_t<AIPreferencePageAdvanced> g_preferences_page_advanced_factory;
+static preferences_page_factory_t<AIPreferencePageProcessing> g_preferences_page_processing_factory;
+static preferences_page_factory_t<AIPreferencePageCacheLogs> g_preferences_page_cache_logs_factory;
 static preferences_page_factory_t<AIPreferencePagePrompts> g_preferences_page_prompts_factory;
 
 }

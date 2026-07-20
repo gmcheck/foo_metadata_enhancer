@@ -4,7 +4,7 @@
 Domain Knowledge Defaults (Layer 2 默认值)
 
 当 <profile>/foo_metadata_enhancer/prompts/*.md 文件缺失时使用的兜底内容。
-从原 base.py 和 stage2_prompts.py 抽取，保持现有行为不变。
+从原 base.py 和 enhance_prompts.py 抽取，保持现有行为不变。
 
 这些内容会随时间演化（新流派、新平台），专家用户可通过编辑 MD 文件覆盖。
 代码内默认值随版本发布更新。
@@ -55,7 +55,7 @@ DEFAULT_SOURCE_PRIORITY = """Source Priority (highest to lowest):
 # =============================================================================
 # 中文译名查询平台清单
 # 对应 MD 文件：translation_platforms.md
-# 从原 stage2_prompts.py::BATCH_ENHANCE_SYSTEM_PROMPT 的 STEP 1 抽取
+# 从原 enhance_prompts.py::BATCH_ENHANCE_SYSTEM_PROMPT 的 STEP 1 抽取
 # =============================================================================
 
 DEFAULT_TRANSLATION_PLATFORMS = """Translation Platform Reference (for official Chinese translations):

@@ -126,14 +126,16 @@ INT_PTR CALLBACK ErrorDialog::DlgProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) 
                     
                 case IDC_VIEW_LOG_BTN:
                     {
-                        std::string profile_path = core_api::get_profile_path();
-                        std::string log_path = profile_path + "\\foo_metadata_enhancer\\logs";
-                        
-                        CreateDirectoryA((profile_path + "\\foo_metadata_enhancer").c_str(), NULL);
-                        CreateDirectoryA(log_path.c_str(), NULL);
-                        
-                        std::string log_file = log_path + "\\core.log";
-                        
+                        // 复用 Logger 统一确定的日志路径（components/foo_metadata_enhancer/logs/core.log）
+                        std::string log_file = Logger::instance().get_log_file_path();
+                        if (log_file.empty()) {
+                            std::string profile_path = core_api::get_profile_path();
+                            std::string log_path = profile_path + "\\foo_metadata_enhancer\\logs";
+                            CreateDirectoryA((profile_path + "\\foo_metadata_enhancer").c_str(), NULL);
+                            CreateDirectoryA(log_path.c_str(), NULL);
+                            log_file = log_path + "\\core.log";
+                        }
+
                         int len = MultiByteToWideChar(CP_UTF8, 0, log_file.c_str(), -1, NULL, 0);
                         std::wstring wlog_file(len, 0);
                         MultiByteToWideChar(CP_UTF8, 0, log_file.c_str(), -1, &wlog_file[0], len);

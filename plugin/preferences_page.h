@@ -376,7 +376,17 @@ public:
     preferences_page_instance::ptr instantiate(HWND parent, preferences_page_callback::ptr callback) override;
 };
 
-class AIPreferencePageAdvanced : public preferences_page_v3 {
+class AIPreferencePageProcessing : public preferences_page_v3 {
+public:
+    static const GUID g_guid;
+
+    const char* get_name() override;
+    GUID get_guid() override;
+    GUID get_parent_guid() override;
+    preferences_page_instance::ptr instantiate(HWND parent, preferences_page_callback::ptr callback) override;
+};
+
+class AIPreferencePageCacheLogs : public preferences_page_v3 {
 public:
     static const GUID g_guid;
 

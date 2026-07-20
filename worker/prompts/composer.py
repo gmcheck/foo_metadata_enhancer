@@ -29,9 +29,9 @@ from .system_core import (
     TRACK_ID_REQUIREMENTS,
     ANTI_HALLUCINATION_RULES,
     CONFIDENCE_GUIDELINES,
-    STAGE1_OUTPUT_SCHEMA,
-    STAGE1_ENHANCED_OUTPUT_SCHEMA,
-    STAGE2_OUTPUT_SCHEMA,
+    SCRAPE_OUTPUT_SCHEMA,
+    SCRAPE_ENHANCED_OUTPUT_SCHEMA,
+    ENHANCE_OUTPUT_SCHEMA,
     FALLBACK_OUTPUT_SCHEMA,
     AI_SCRAPE_OUTPUT_SCHEMA,
     build_batch_example,
@@ -97,8 +97,8 @@ class PromptComposer:
     # Stage 2：翻译（仅翻译，不再分类/识别版本）
     # =========================================================================
 
-    def build_stage2_system_prompt(self) -> str:
-        """构建 Stage2 系统提示（仅翻译）
+    def build_enhance_system_prompt(self) -> str:
+        """构建 Enhance 系统提示（仅翻译）
 
         组装顺序：
         Layer 1（角色 + JSON 契约）
@@ -107,13 +107,13 @@ class PromptComposer:
           + Layer 3（翻译规则 + 自定义 hints）
           + Layer 1（输出 schema，尾部强化）
 
-        注意：自 V8.2 起，genre 已移至 Stage1（MusicBrainz 抓取），
-        edition 已移除。Stage2 仅保留翻译能力（基于已有元数据生成新价值）。
+        注意：自 V8.2 起，genre 已移至 Scrape（MusicBrainz 抓取），
+        edition 已移除。Enhance 仅保留翻译能力（基于已有元数据生成新价值）。
         """
         parts: List[str] = [
             # Layer 1：角色 + JSON 契约
             SYSTEM_CORE_ROLE_ENHANCE,
-            self._build_stage2_task_description(),
+            self._build_enhance_task_description(),
             SYSTEM_CORE_JSON_REQUIREMENTS,
             # Provider Profile
             self.provider_extra_instructions,
@@ -123,12 +123,12 @@ class PromptComposer:
             self._build_translation_rules(),
             self._build_custom_hints(),
             # Layer 1：尾部强化输出契约
-            STAGE2_OUTPUT_SCHEMA,
+            ENHANCE_OUTPUT_SCHEMA,
         ]
         return "\n\n".join(p for p in parts if p and p.strip())
 
-    def _build_stage2_task_description(self) -> str:
-        """构建 Stage2 任务描述（仅翻译）
+    def _build_enhance_task_description(self) -> str:
+        """构建 Enhance 任务描述（仅翻译）
 
         注：具体翻译哪些字段由运行时 EnhancementOptions 在 user message 中指定，
         system prompt 仅描述任务能力，不重复声明字段开关。
@@ -217,8 +217,8 @@ class PromptComposer:
     # Stage 1：候选决策
     # =========================================================================
 
-    def build_stage1_system_prompt(self, enhanced: bool = False) -> str:
-        """构建 Stage1 系统提示（候选决策）
+    def build_scrape_system_prompt(self, enhanced: bool = False) -> str:
+        """构建 Scrape 系统提示（候选决策）
 
         Args:
             enhanced: 是否增强模式（候选不足时启用推断）
@@ -232,12 +232,12 @@ class PromptComposer:
         """
         if enhanced:
             role = SYSTEM_CORE_ROLE_ENHANCED
-            task_desc = self._build_stage1_enhanced_task()
-            schema = STAGE1_ENHANCED_OUTPUT_SCHEMA
+            task_desc = self._build_scrape_enhanced_task()
+            schema = SCRAPE_ENHANCED_OUTPUT_SCHEMA
         else:
             role = SYSTEM_CORE_ROLE_RESOLVE
-            task_desc = self._build_stage1_normal_task()
-            schema = STAGE1_OUTPUT_SCHEMA
+            task_desc = self._build_scrape_normal_task()
+            schema = SCRAPE_OUTPUT_SCHEMA
 
         parts: List[str] = [
             # Layer 1：角色
@@ -250,7 +250,7 @@ class PromptComposer:
             # Layer 2：数据源优先级
             self.dk_loader.get_source_priority(),
             # 决策指南
-            self._build_stage1_guidelines(enhanced),
+            self._build_scrape_guidelines(enhanced),
             CONFIDENCE_GUIDELINES,
             ANTI_HALLUCINATION_RULES,
             # Layer 1：尾部强化输出契约
@@ -258,8 +258,8 @@ class PromptComposer:
         ]
         return "\n\n".join(p for p in parts if p and p.strip())
 
-    def _build_stage1_normal_task(self) -> str:
-        """Stage1 普通模式任务描述"""
+    def _build_scrape_normal_task(self) -> str:
+        """Scrape 普通模式任务描述"""
         return """For each track, you will receive:
 1. An original query (what the user provided)
 2. A list of candidates from different sources (MusicBrainz, Discogs, etc.)
@@ -270,8 +270,8 @@ You need to:
 3. Correct any obvious errors
 4. Provide a confidence score for each decision"""
 
-    def _build_stage1_enhanced_task(self) -> str:
-        """Stage1 增强模式任务描述"""
+    def _build_scrape_enhanced_task(self) -> str:
+        """Scrape 增强模式任务描述"""
         return """In addition to selecting from candidates, you may:
 1. Infer missing metadata from patterns
 2. Correct obvious errors in candidates
@@ -282,8 +282,8 @@ For each track, you will receive:
 1. An original query (what the user provided)
 2. A list of candidates from different sources (MusicBrainz, Discogs, etc.)"""
 
-    def _build_stage1_guidelines(self, enhanced: bool) -> str:
-        """Stage1 决策指南"""
+    def _build_scrape_guidelines(self, enhanced: bool) -> str:
+        """Scrape 决策指南"""
         guidelines = """Guidelines:
 - Prefer candidates from authoritative sources (MusicBrainz > Discogs > AI)
 - Higher candidate confidence should generally be trusted more
@@ -408,19 +408,19 @@ def reset_composer() -> None:
 # 调用方仍可 import BATCH_*_SYSTEM_PROMPT，内部走 Composer（默认 config）
 # =============================================================================
 
-def _build_default_stage1_normal_prompt() -> str:
-    """使用默认 config 构建 Stage1 普通模式 Prompt"""
-    return get_composer({}).build_stage1_system_prompt(enhanced=False)
+def _build_default_scrape_normal_prompt() -> str:
+    """使用默认 config 构建 Scrape 普通模式 Prompt"""
+    return get_composer({}).build_scrape_system_prompt(enhanced=False)
 
 
-def _build_default_stage1_enhanced_prompt() -> str:
-    """使用默认 config 构建 Stage1 增强模式 Prompt"""
-    return get_composer({}).build_stage1_system_prompt(enhanced=True)
+def _build_default_scrape_enhanced_prompt() -> str:
+    """使用默认 config 构建 Scrape 增强模式 Prompt"""
+    return get_composer({}).build_scrape_system_prompt(enhanced=True)
 
 
-def _build_default_stage2_prompt() -> str:
-    """使用默认 config 构建 Stage2 Prompt"""
-    return get_composer({}).build_stage2_system_prompt()
+def _build_default_enhance_prompt() -> str:
+    """使用默认 config 构建 Enhance Prompt"""
+    return get_composer({}).build_enhance_system_prompt()
 
 
 def _build_default_fallback_prompt() -> str:

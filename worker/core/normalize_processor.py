@@ -141,13 +141,15 @@ class NormalizeProcessor:
         # ----------------------------------------------------------------
         # 查询使用 alias_key 归一化匹配（NFC + strip + lower），
         # "Beyond" / "beyond " / "BEYOND" 都能命中同一条记录。
+        cache_hits = 0
         if self._store and candidates:
             known_groups, unknown_candidates = self._query_store_and_split(
                 field, candidates, known_groups
             )
+            cache_hits = len(candidates) - len(unknown_candidates)
             logger.info(
                 f"NormalizeProcessor::process: SQLite hit "
-                f"{len(candidates) - len(unknown_candidates)}/{len(candidates)} aliases, "
+                f"{cache_hits}/{len(candidates)} aliases, "
                 f"known_groups={len(known_groups)}, unknown={len(unknown_candidates)}"
             )
         else:
@@ -170,7 +172,14 @@ class NormalizeProcessor:
                 "id": request_id,
                 "task_id": task_id,
                 "success": True,
-                "result": {"groups": known_groups, "uncertain": [], "track_updates": track_updates},
+                "result": {
+                    "groups": known_groups,
+                    "uncertain": [],
+                    "track_updates": track_updates,
+                    "cache_hits": cache_hits,
+                    "api_calls": 0,
+                    "tokens_used": 0,
+                },
             }
 
         try:
@@ -305,6 +314,11 @@ class NormalizeProcessor:
                 f"track_updates, matched="
                 f"{sum(1 for u in result['track_updates'] if u.get('matched'))}"
             )
+
+            # 把统计字段写入 result，让 C++ 端能从 results[0] 解析
+            result["cache_hits"] = cache_hits
+            result["api_calls"] = 1
+            result["tokens_used"] = response.tokens_used
 
             return {
                 "id": request_id,

@@ -14,7 +14,7 @@ namespace ai_metadata {
  * @brief 音轨分析选项结构体
  *
  * V8.2: classify_genre / identify_edition 已移除。
- * - genre 由 Stage1 从 MusicBrainz 抓取
+ * - genre 由 Scrape 从 MusicBrainz 抓取
  * - edition 已废弃（AI 推断不可靠）
  */
 struct TrackOptions {
@@ -73,9 +73,9 @@ struct ScrapingOptions {
  * @brief V8新增：增强选项结构体 - 阶段二
  *
  * V8.2: classify_genre / identify_edition 已移除。
- * - genre 由 Stage1 从 MusicBrainz 抓取
+ * - genre 由 Scrape 从 MusicBrainz 抓取
  * - edition 已废弃
- * Stage2 仅做翻译（基于已有元数据生成新价值）。
+ * Enhance 仅做翻译（基于已有元数据生成新价值）。
  */
 struct EnhancementOptions {
     // 翻译
@@ -118,6 +118,7 @@ struct TrackScrapingResult {
     std::string release_id;
     DataSourceType release_source = DataSourceType::MUSICBRAINZ;
     std::string error;
+    bool cache_hit = false;         ///< 是否缓存命中（缓存命中不消耗 AI 资源）
 };
 
 enum class FailureReason {
@@ -147,6 +148,8 @@ struct EnhancementResult {
     float translation_confidence = 0.0f;
 
     std::string error;
+    uint32_t tokens_used = 0;       ///< AI 调用消耗的令牌数（仅远程 API 调用累计）
+    bool cache_hit = false;         ///< 是否缓存命中（缓存命中不消耗 tokens）
 };
 
 /**
@@ -201,7 +204,7 @@ struct GenreResult {
 /**
  * @brief 版本识别结果结构体（V8.2 已废弃）
  *
- * 保留此结构体仅用于向后兼容旧数据/JSON。Stage2 不再产出 edition。
+ * 保留此结构体仅用于向后兼容旧数据/JSON。Enhance 不再产出 edition。
  */
 struct EditionResult {
     std::string value;      ///< 版本类型
@@ -221,10 +224,10 @@ struct TranslationResult {
  * @brief AI分析结果结构体
  *
  * V8.2: edition 字段已移除（已废弃）。
- * genre 字段保留作为兼容（实际 genre 由 Stage1 抓取，不在此结果中产出）。
+ * genre 字段保留作为兼容（实际 genre 由 Scrape 抓取，不在此结果中产出）。
  */
 struct AIResult {
-    GenreResult genre;              ///< 流派结果（兼容字段，Stage2 不再产出）
+    GenreResult genre;              ///< 流派结果（兼容字段，Enhance 不再产出）
     TranslationResult translation;  ///< 翻译结果
     double translation_confidence = 0.0; ///< 翻译置信度
 };
@@ -327,6 +330,11 @@ struct NormalizeResult {
     std::vector<NormalizeGroup> groups;                 ///< 已分组建议
     std::vector<NormalizeUncertain> uncertain;          ///< 无法判定的 alias
     std::vector<NormalizeTrackUpdate> track_updates;    ///< 每个 track 的写入指令
+
+    // 统计信息（由 Python 端回填，用于 CompletionStats 展示）
+    int cache_hits = 0;       ///< SQLite normalize_alias 表命中的 alias 数
+    int api_calls = 0;        ///< AI 调用次数（0=全缓存命中）
+    int tokens_used = 0;      ///< AI token 用量（0=全缓存命中或未统计）
 };
 
 /**
@@ -340,15 +348,37 @@ enum class ErrorLevel {
 };
 
 /**
+ * @brief 错误来源分类
+ *
+ * 用于错误反馈 UI 按来源展示不同图标、文案和修复建议按钮。
+ * 设计原则：每类错误对应一组明确的用户引导动作。
+ */
+enum class ErrorCategory {
+    Unknown,            ///< 未分类（兜底）
+    Config,             ///< 配置错误（缺 API Key / Python 路径错误 / Provider 未选）
+    Network,            ///< 网络错误（连接超时 / DNS 失败 / SSL 错误）
+    Auth,               ///< 鉴权失败（API Key 无效 / 401 / 403）
+    RateLimit,          ///< 速率限制（429 / 配额耗尽）
+    ApiError,           ///< 上游 API 业务错误（模型不存在 / 请求格式错误 / 5xx）
+    PythonWorker,       ///< Python worker 异常（启动失败 / crash / IPC 断开）
+    AiInference,        ///< AI 推理错误（响应解析失败 / JSON 格式错误 / 字段缺失）
+    DataSource,         ///< 外部数据源错误（MusicBrainz / Discogs 查询失败）
+    FileSystem,         ///< 文件系统错误（无法读 tag / 写 tag / 数据库锁定）
+    UserCancelled,      ///< 用户主动取消（非错误，用于流程跳转）
+    NoData,              ///< 无可处理数据（无选中曲目 / 无快照 / 字段全空）
+};
+
+/**
  * @brief 错误信息结构体
  */
 struct ErrorInfo {
     std::string code;           ///< 错误代码
-    std::string message;        ///< 错误消息
-    std::string detail;         ///< 错误详情
+    std::string message;        ///< 错误消息（用户可见的一行摘要）
+    std::string detail;         ///< 错误详情（技术细节，多行）
     bool retryable = false;     ///< 是否可重试
     bool can_retry = false;     ///< 是否可以重试
     ErrorLevel level = ErrorLevel::Error; ///< 错误级别
+    ErrorCategory category = ErrorCategory::Unknown; ///< 错误来源分类
 };
 
 /**

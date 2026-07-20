@@ -17,8 +17,10 @@
 9. [缓存系统](#9-缓存系统)
 10. [备份与回滚](#10-备份与回滚)
 11. [日志系统](#11-日志系统)
-12. [常见问题](#12-常见问题)
-13. [从源码构建](#13-从源码构建)
+12. [Worker 进程管理与 IPC 通信](#12-worker-进程管理与-ipc-通信)
+13. [配置系统](#13-配置系统)
+14. [常见问题](#14-常见问题)
+15. [从源码构建](#15-从源码构建)
 
 ---
 
@@ -569,7 +571,69 @@ Select rollback operations:
 | Gemini | gemini-1.5-flash | 免费，速度快 |
 | Ollama | llama3.1:8b | 本地运行，需要 8GB+ VRAM |
 
-#### 6.1.2 Python 区域
+#### 6.1.2 Provider 切换与 API Key 自动保存机制
+
+为支持多 Provider 频繁切换，每个 Provider 的 API Key 与 Model 选择独立存储，切换时自动保留与恢复：
+
+**数据结构**：
+
+```cpp
+// 每个 Provider 维护独立配置
+struct ProviderConfig {
+    std::string api_key;             // 该 Provider 的 API Key
+    std::string selected_model;      // 该 Provider 选中的模型
+    std::vector<ModelInfo> models;   // 该 Provider 可用模型列表
+};
+
+struct PluginSettings {
+    AIProvider provider;                                // 当前激活 Provider
+    std::map<AIProvider, ProviderConfig> provider_configs;  // 各 Provider 独立配置
+    ProviderConfig& get_current_provider_config();      // 取当前 Provider 配置
+};
+```
+
+**切换 Provider 的内部流程**（`on_provider_changed`）：
+
+1. **保存当前 API Key 到旧 Provider**：从输入框读取 API Key，写入旧 Provider 的 `ProviderConfig.api_key`
+2. **切换 `m_settings.provider`** 到新 Provider
+3. **从新 Provider 加载 API Key 到输入框**（`update_api_key_for_provider`）
+4. **从新 Provider 加载 Model 列表与选中项**（`update_model_combo`）
+
+这样设计的好处：用户在 Provider A 输入 API Key 后切到 Provider B，再切回 Provider A 时 API Key 仍然保留，无需重新输入。
+
+**Test API 按钮**：
+
+测试按钮会使用当前 UI 选中的 Provider 和 Model 实例化临时 Provider（不读 config 默认值），保证测试结果与 UI 显示一致。
+
+#### 6.1.3 Provider 变更后的 Worker 重启策略
+
+应用配置时若检测到 `provider`、`api_key` 或 `selected_model` 任一变化，将触发 **异步 Worker 重启** 让新配置在新进程中生效：
+
+**为什么需要重启而非 reload**：
+- ScrapeProcessor / AIResolver 等对象在请求处理时才创建，但已缓存的 Provider 实例不会刷新
+- 重启是最确定的方式，让 Python Worker 从 `settings.json` 重新加载完整配置
+
+**为什么需要异步**：
+- `restart_all_workers()` 内部会调用 `WaitForSingleObject` 等待 Worker 进程退出（最长 1 秒）
+- 如果在 UI 线程同步执行，会与 `worker_read_loop` 线程争抢 `worker_mutex_` 导致 fb2k UI 卡死
+- 因此使用 `std::thread(...).detach()` 在后台线程执行重启
+
+```cpp
+if (provider_changed || api_key_or_model_changed) {
+    std::thread([ai_core]() {
+        try {
+            ai_core->restart_all_workers();
+            Logger::instance().info("apply: worker restart completed", ...);
+        } catch (const std::exception& e) {
+            Logger::instance().error(std::string("apply: worker restart failed: ") + e.what(), ...);
+        }
+    }).detach();
+}
+```
+
+**日志级别变更不重启**：日志级别通过 `update_worker_log_level` 动态通知 Python Worker，无需重启进程。
+
+#### 6.1.4 Python 区域
 
 | 设置项 | 说明 | 默认值 |
 |--------|------|--------|
@@ -586,7 +650,7 @@ Select rollback operations:
 | Python not found | 未找到 Python，需要手动配置路径 |
 | Packages missing | 缺少依赖包，启用 Auto-install 或手动安装 |
 
-#### 6.1.3 Cache 区域
+#### 6.1.5 Cache 区域
 
 | 设置项 | 说明 | 默认值 |
 |--------|------|--------|
@@ -602,7 +666,7 @@ Select rollback operations:
 - 位置：`%APPDATA%\foobar2000-v2\foo_metadata_enhancer\cache.db`
 - 启用缓存可大幅减少 API 调用，节省费用
 
-#### 6.1.4 Logging 区域
+#### 6.1.6 Logging 区域
 
 | 设置项 | 说明 | 默认值 |
 |--------|------|--------|
@@ -905,18 +969,22 @@ Scrape Metadata 按以下优先级查询数据源：
 
 ### 9.1 缓存机制
 
-插件使用 SQLite 数据库缓存处理结果：
+插件使用 SQLite 数据库缓存处理结果，分为两个独立表：
 
-- **Scrape 缓存**：基于 TITLE + ARTIST + ALBUM 的查询结果
-- **Enhance 缓存**：基于完整元数据的增强结果
+| 缓存表 | 用途 | 缓存键 |
+|--------|------|--------|
+| `scrape_cache` | Scrape Metadata 阶段的查询结果 | `track_id`（基于文件路径） |
+| `enhance_cache` | Enhance Metadata 阶段的增强结果 | `track_id`（基于文件路径） |
 
 ### 9.2 缓存键生成
 
-缓存键通过 SHA256 哈希生成：
+缓存键直接使用 `track_id`，由文件路径信息生成：
 
 ```
 track_id = SHA256(path + "|" + subsong + "|" + file_size)
 ```
+
+**特性**：同一文件（含同路径同大小）的 `track_id` 稳定，重复 scrape 时能命中缓存。
 
 ### 9.3 缓存位置
 
@@ -924,14 +992,55 @@ track_id = SHA256(path + "|" + subsong + "|" + file_size)
 %APPDATA%\foobar2000-v2\foo_metadata_enhancer\cache.db
 ```
 
-### 9.4 缓存统计
+### 9.4 cache_hit_count 累加机制
+
+每个缓存条目维护 `cache_hit_count` 字段记录被命中次数。命中流程：
+
+```
+get_scrape(cache_key)
+   ├─ SELECT ... FROM scrape_cache WHERE cache_key = ?
+   ├─ if (SQLITE_ROW)  // 命中
+   │    ├─ 读取条目
+   │    └─ UPDATE scrape_cache
+   │         SET cache_hit_count = cache_hit_count + 1,
+   │             last_accessed_at = datetime('now')
+   │         WHERE cache_key = ?
+   └─ else  // 未命中
+        └─ 返回 std::nullopt
+```
+
+**关键设计**：cache hit 时 **不调用 `set_scrape` 重写缓存**，因为 `set_scrape` 使用 `INSERT OR REPLACE`，会先 DELETE 旧行再 INSERT 新行，把 `cache_hit_count` 重置回 0。
+
+`menu_handler` 在写入缓存前会检查 `result.cache_hit` 字段：
+
+```cpp
+if (!result.cache_hit) {
+    g_ai_core->save_scrape_cache(cache_key, result, m_inputs[i]);
+}
+```
+
+### 9.5 缓存统计的实时计算
+
+`CacheLayer::get_statistics()` 实时查询数据库计算统计值，不依赖独立的 `cache_statistics` 计数器：
+
+```sql
+SELECT
+    (SELECT COUNT(*) FROM scrape_cache) +
+    (SELECT COUNT(*) FROM enhance_cache) AS total_entries,
+    (SELECT COALESCE(SUM(cache_hit_count), 0) FROM scrape_cache) +
+    (SELECT COALESCE(SUM(cache_hit_count), 0) FROM enhance_cache) AS total_hits
+```
 
 | 统计项 | 计算方式 |
 |--------|----------|
-| Total Entries | stage1_cache 条目数 + stage2_cache 条目数 |
-| Cache Hits | 所有条目的 cache_hit_count 总和 |
+| Total Entries | `scrape_cache` 行数 + `enhance_cache` 行数 |
+| Cache Hits | `SUM(cache_hit_count)` 跨两个表 |
+| Cache Misses | Total Entries - Cache Hits |
 | Hit Rate | Hits / (Hits + Misses) × 100% |
 | API Calls Saved | 等于 Cache Hits |
+| Database Size | 实际数据库文件大小（MB） |
+
+**好处**：统计数据始终与缓存表内容一致，不会出现"统计未更新"或"数据漂移"问题。`cache_statistics` 表仅作为最近一次查询的快照（含 `updated_at`），用于显示，不参与计算。
 
 ---
 
@@ -985,10 +1094,18 @@ V8.2 起，每次执行 Scrape / Enhance / Normalize 之前，插件会按**操�
 
 ## 11. 日志系统
 
-### 11.1 日志位置
+插件运行日志分为两个独立文件，便于区分 C++ 端与 Python 端的问题。
+
+### 11.1 日志位置与分类
+
+| 日志文件 | 写入方 | 内容 |
+|---------|--------|------|
+| `core.log` | C++ 端（fb2k 进程内） | UI 事件、Worker 进程管理、缓存统计、scrape/enhance 调度 |
+| `worker.log` | Python Worker 进程 | AI 调用、MusicBrainz/Discogs 查询、解析与异常 |
 
 ```
-%APPDATA%\foobar2000-v2\foo_metadata_enhancer\logs\ai_metadata.log
+<components>/foo_metadata_enhancer/logs/core.log
+<components>/foo_metadata_enhancer/logs/worker.log
 ```
 
 ### 11.2 日志级别
@@ -1000,6 +1117,8 @@ V8.2 起，每次执行 Scrape / Enhance / Normalize 之前，插件会按**操�
 | WARNING | 警告信息 | 潜在问题 |
 | ERROR | 错误信息 | 错误情况 |
 
+**动态调整**：在 Preferences → AI Metadata → General 中修改 Logging Level 后，C++ 端通过 `update_worker_log_level` 实时通知 Python Worker，无需重启进程即可生效。
+
 ### 11.3 日志轮转
 
 日志文件自动轮转：
@@ -1009,9 +1128,228 @@ V8.2 起，每次执行 Scrape / Enhance / Normalize 之前，插件会按**操�
 
 ---
 
-## 12. 常见问题
+## 12. Worker 进程管理与 IPC 通信
 
-### 12.1 菜单中看不到 AI Metadata
+插件采用 **C++ 主进程 + Python Worker 子进程** 架构：C++ 端负责 UI、菜单、文件 IO、缓存；Python 端负责 AI 调用、网络爬虫。两者通过 **长度前缀 JSON** 协议在子进程的 stdin/stdout 上通信。
+
+### 12.1 IPC 消息格式
+
+每条消息由 **4 字节大端长度头 + UTF-8 JSON payload** 组成：
+
+```
++----------------+--------------------------------+
+| length (4B BE) | json payload (UTF-8, length B) |
++----------------+--------------------------------+
+```
+
+C++ 端读取流程：先读 4 字节解析长度 → 按长度读 payload → `nlohmann::json::parse` → 分发到 `process_worker_response`。
+
+### 12.2 消息类型
+
+| `type` 字段 | 方向 | 用途 |
+|------------|------|------|
+| （无，默认响应） | Python → C++ | 请求处理结果，含 `id`/`success`/`results` |
+| `progress` | Python → C++ | 进度上报，仅刷新 `send_time`，不删除 pending request，不触发回调 |
+| （C++ → Python 的请求） | C++ → Python | 携带 `id` 和 `action`，如 `scrape` / `enhance` / `test_api` |
+
+### 12.3 进度消息协议（Progress Message）
+
+**背景**：C++ 端的 `WorkerManager` 维护一个 `max_silence_time_ms` 超时机制。若某个 pending request 自上次 `send_time` 起超过阈值仍无响应，会判定 Worker 卡死并调用 `force_restart_worker()`。
+
+**问题**：AI 调用、MusicBrainz 重试等操作单次耗时较长（30 秒以上），期间 Python 无法返回最终结果，但实际并未卡死。
+
+**解决**：Python 在长耗时操作中调用 `write_progress(progress, message)`，发送 `type="progress"` 消息：
+
+```python
+# worker/ipc_utils.py
+def write_progress(progress: float, message: str) -> None:
+    data = {
+        "id": _current_request_id,
+        "type": "progress",
+        "progress": float(progress),
+        "message": str(message),
+    }
+    # 4 字节大端长度头 + JSON payload
+    json_bytes = json.dumps(data, ensure_ascii=False).encode('utf-8')
+    header = struct.pack('>I', len(json_bytes))
+    with _stdout_write_lock:
+        sys.stdout.buffer.write(header)
+        sys.stdout.buffer.write(json_bytes)
+        sys.stdout.buffer.flush()
+```
+
+C++ 端收到后：
+
+```cpp
+if (msg_type == "progress") {
+    std::lock_guard<std::mutex> lock(pending_mutex_);
+    auto it = pending_requests_.find(request_id);
+    if (it != pending_requests_.end()) {
+        it->second.send_time = GetTickCount();   // 刷新发送时间
+    }
+    return;   // 不删除 pending，不调 callback
+}
+```
+
+### 12.4 独立的 ipc_utils 模块
+
+进度上报函数放在独立模块 `worker/ipc_utils.py`，而不是 `ai_worker.py`。原因：
+
+- `ai_worker.py` 作为 `__main__` 模块运行，模块名是 `__main__`
+- 其它模块（`scrape_processor.py`、`resolver.py`）若 `from ai_worker import write_progress` 会触发 `ImportError`，因为 `ai_worker` 这个名字未被 Python 加载
+- 把 `write_progress` 放到独立模块后，所有模块都从 `ipc_utils` 导入即可正确共享状态
+
+模块还维护：
+
+- `_stdout_write_lock`：stdout 写入锁，与 `write_message` 互斥，避免心跳线程与主线程并发写破坏 4 字节长度头帧格式
+- `_current_request_id`：当前活跃请求 ID，供 `write_progress` 使用
+
+### 12.5 Worker 重启机制
+
+`WorkerManager` 提供三种重启方式：
+
+| 方法 | 触发场景 | 行为 |
+|------|----------|------|
+| `restart_worker()` | 配置变更（provider/api_key/model） | 停止当前进程 → 启动新进程 |
+| `force_restart_worker()` | `max_silence_time_ms` 超时 | 强制终止当前进程 → 启动新进程 |
+| `reload_worker()` | 仅日志级别等不需要新进程的变更 | 通过 IPC 通知 Python 重新加载配置（不重启进程） |
+
+**停止流程**（`stop_worker_locked`）：
+1. 关闭 stdin 阻断 Python 端 `for line in sys.stdin` 循环
+2. `WaitForSingleObject` 等待进程退出（最长 1 秒）
+3. 超时则 `TerminateProcess` 强制终止
+4. 关闭句柄、清理 pending requests
+
+**启动流程**（`start_worker_locked`）：
+1. `CreateProcess` 启动 `python ai_worker.py`
+2. 启动 `worker_read_loop` 线程持续读取 stdout
+3. 启动心跳检测线程
+
+### 12.6 Pending Request 管理
+
+每个发送给 Python 的请求会登记到 `pending_requests_` 表：
+
+```cpp
+struct PendingRequest {
+    ResultCallback callback;       // 成功回调
+    ErrorCallback error_callback;  // 失败回调
+    DWORD send_time;               // 发送时间（用于超时检测）
+    // ...
+};
+```
+
+- 发送时：`send_time = GetTickCount()`，加入 map
+- 收到响应：查找对应 `id`，调用 callback，从 map 移除
+- 收到 progress：查找对应 `id`，更新 `send_time`，不移除
+- 超时检测线程：周期性扫描，`elapsed > max_silence_time_ms_` 则 `force_restart_worker()`
+
+### 12.7 推荐的超时配置
+
+| 操作类型 | 建议 `max_silence_time_ms` | 原因 |
+|---------|---------------------------|------|
+| AI 调用 | 120000 ms（2 分钟） | AI 模型响应慢，progress 消息会持续刷新 |
+| MusicBrainz | 60000 ms（1 分钟） | 网络重试较多 |
+| Discogs | 60000 ms（1 分钟） | 同上 |
+
+如果 `core.log` 中出现 `force_restart_worker` 警告，说明超时配置过短或 progress 消息未正确发送。
+
+---
+
+## 13. 配置系统
+
+插件配置由两个来源合并而成：`config.yaml` 提供默认值与 Provider 定义，`settings.json` 保存用户在 UI 上的偏好。Python Worker 启动时由 `ConfigManager` 合并两者。
+
+### 13.1 配置文件位置
+
+| 文件 | 写入方 | 内容 | Git |
+|------|--------|------|-----|
+| `worker/config.yaml` | 开发者 | Provider 默认值、API endpoint、模型列表、Prompts 模板 | 排除（含 API Key） |
+| `worker/config.yaml.template` | 开发者 | 同上但 API Key 留空 | 提交 |
+| `<profile>/foo_metadata_enhancer/settings.json` | C++ 端 | 用户在 Preferences UI 选择/输入的设置 | 运行时生成 |
+
+### 13.2 settings.json 字段
+
+`settings.json` 是 C++ 端 `SettingsManager` 持久化的设置，主要字段：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `provider` | string | 当前激活 Provider 名称（zhipu / openrouter / gemini / ollama / deepseek） |
+| `provider_configs` | object | 各 Provider 的独立配置，键为 provider 名 |
+| `provider_configs.<name>.api_key` | string | 该 Provider 的 API Key |
+| `provider_configs.<name>.selected_model` | string | 该 Provider 选中的模型 |
+| `taskqueue_batch_size` | int | Scrape 批次大小 |
+| `ai_batch_size` | int | Enhance 批次大小 |
+| `log_level` | int | 日志级别（0=DEBUG, 1=INFO, 2=WARN, 3=ERROR） |
+| `prompts.user_prefs` | object | AI Prompt 页面的用户偏好（translation_style、custom_hints 等） |
+
+### 13.3 合并流程
+
+`ConfigManager._load_config()` 启动时执行：
+
+1. 读取 `config.yaml`，得到完整默认配置（providers、worker、prompts、logging 等）
+2. 调用 `_load_cpp_settings()` 读取 `settings.json`
+3. 调用 `_merge_cpp_settings()` 合并：
+   - `provider` → `providers.default`
+   - `provider_configs[*].api_key` → `providers.<name>.api_key`（仅当非空时覆盖）
+   - `provider_configs[*].selected_model` → `providers.<name>.selected_model`（仅当非空时覆盖）
+   - `ai_batch_size` → `worker.batch_size`
+   - `taskqueue_batch_size` → `worker.taskqueue_batch_size`
+   - `prompts.user_prefs` → 深度合并到 `prompts` 节点
+
+```python
+# worker/common/config_manager.py
+def _merge_cpp_settings(self, cpp_settings: Dict[str, Any]) -> None:
+    provider = cpp_settings.get("provider", "")
+    if provider:
+        self._config["providers"]["default"] = provider
+
+    provider_configs = cpp_settings.get("provider_configs", {})
+    for prov_name, prov_config in provider_configs.items():
+        if prov_name in self._config.get("providers", {}):
+            selected_model = prov_config.get("selected_model", "")
+            api_key = prov_config.get("api_key", "")
+            if selected_model:
+                self._config["providers"][prov_name]["selected_model"] = selected_model
+            if api_key:
+                self._config["providers"][prov_name]["api_key"] = api_key
+    # ...
+```
+
+### 13.4 配置变更的生效路径
+
+| 变更类型 | 生效方式 | 是否重启 Worker |
+|---------|----------|----------------|
+| Provider / API Key / Model | 异步 `restart_all_workers()` | 是 |
+| 日志级别 | `update_worker_log_level` IPC 通知 | 否 |
+| 批次大小 | 下次 scrape/enhance 请求时读取新值 | 否 |
+| Translation Style / Custom Hints | Python 端从 settings.json 重新读取 | 否 |
+
+### 13.5 测试 API 的配置来源
+
+点击 General 设置页面的 **Test** 按钮时，C++ 端通过 IPC 把当前 UI 选中的 Provider 和 Model 传给 Python 的 `process_test_api`。Python 端 **不读 config 默认值**，而是用传入参数临时构造 Provider 实例：
+
+```python
+def process_test_api(request: Dict) -> Dict:
+    params = request.get("params", {})
+    provider = params.get("provider", "zhipu")
+    model = params.get("model", "")
+
+    # 必须用 UI 传入的 provider/model 创建实例，而不是 config 里的 default。
+    # 否则用户在 UI 切换 provider 后 test_api 仍然测的是旧 provider。
+    provider_cfg = providers_cfg.get(provider, {})
+    provider_cfg = dict(provider_cfg)
+    if model:
+        provider_cfg["selected_model"] = model
+    provider_instance = AIProviderFactory.create_from_config(provider_cfg, provider)
+```
+
+这样保证测试结果与 UI 当前选择一致，而不是与上次保存的配置一致。
+
+---
+
+## 14. 常见问题
+
+### 14.1 菜单中看不到 AI Metadata
 
 **原因**：
 - 插件未正确安装
@@ -1022,7 +1360,7 @@ V8.2 起，每次执行 Scrape / Enhance / Normalize 之前，插件会按**操�
 2. 检查 Help → About 中是否显示插件
 3. 升级 foobar2000 到 2.0 或更高版本
 
-### 12.2 处理时提示 "TITLE 或 ARTIST 缺失"
+### 14.2 处理时提示 "TITLE 或 ARTIST 缺失"
 
 **原因**：Scrape Metadata 需要 TITLE 和 ARTIST 作为查询依据。
 
@@ -1030,7 +1368,7 @@ V8.2 起，每次执行 Scrape / Enhance / Normalize 之前，插件会按**操�
 1. 手动填写缺失的标签
 2. 使用其他工具（如 MusicBrainz Picard）先获取基础信息
 
-### 12.3 AI 处理失败
+### 14.3 AI 处理失败
 
 **可能原因**：
 - API Key 无效
@@ -1044,7 +1382,7 @@ V8.2 起，每次执行 Scrape / Enhance / Normalize 之前，插件会按**操�
 3. 检查 API 账户余额
 4. 尝试其他模型
 
-### 12.4 处理速度很慢
+### 14.4 处理速度很慢
 
 **可能原因**：
 - 批次大小过小
@@ -1056,7 +1394,7 @@ V8.2 起，每次执行 Scrape / Enhance / Normalize 之前，插件会按**操�
 2. 使用更快的 AI 模型
 3. 使用本地 Ollama 模型
 
-### 12.5 CUE 分轨无法写入标签
+### 14.5 CUE 分轨无法写入标签
 
 **原因**：CUE 文件无法直接修改。
 
@@ -1064,7 +1402,7 @@ V8.2 起，每次执行 Scrape / Enhance / Normalize 之前，插件会按**操�
 1. 安装 External Tags 插件
 2. 按照本文档 2.4 节配置
 
-### 12.6 Worker 进程崩溃
+### 14.6 Worker 进程崩溃
 
 **可能原因**：
 - Python 环境问题
@@ -1076,11 +1414,35 @@ V8.2 起，每次执行 Scrape / Enhance / Normalize 之前，插件会按**操�
 2. 检查 Python 版本（需要 3.11+）
 3. 启用 Auto-install packages
 
+### 14.7 切换 Provider 后 fb2k 卡死
+
+**原因**：`apply` 中同步调用 `restart_all_workers()`，UI 线程等待 Worker 进程终止而卡死。
+
+**解决方案**：
+- 已在 v1.3.0 修复：使用 `std::thread(...).detach()` 异步执行 Worker 重启
+
+### 14.8 切换 Provider 后 API Key 丢失
+
+**原因**：`on_provider_changed` 切换 Provider 时未先保存当前输入框的 API Key 到旧 Provider 配置。
+
+**解决方案**：
+- 已在 v1.3.0 修复：切换前自动保存当前 API Key 到旧 Provider 的 `ProviderConfig`
+
+### 14.9 Cache Statistics 显示 Cache Hits 为 0
+
+**可能原因**：
+- 旧版本 `menu_handler` 在 cache hit 时仍调用 `save_scrape_cache`，`INSERT OR REPLACE` 会把 `cache_hit_count` 重置为 0
+- 缓存命中检测逻辑有问题
+
+**解决方案**：
+- 已在 v1.3.0 修复：cache hit 时跳过 `save_scrape_cache`
+- 检查 `core.log` 中的 `get_scrape` 日志，确认是否真的命中
+
 ---
 
-## 13. 从源码构建
+## 15. 从源码构建
 
-### 13.1 构建环境
+### 15.1 构建环境
 
 | 组件 | 要求 |
 |------|------|
@@ -1090,7 +1452,7 @@ V8.2 起，每次执行 Scrape / Enhance / Normalize 之前，插件会按**操�
 | vcpkg | 安装 nlohmann-json |
 | Python | 3.11+ (运行时需要) |
 
-### 13.2 配置文件
+### 15.2 配置文件
 
 项目包含两套配置文件：
 
@@ -1105,7 +1467,7 @@ V8.2 起，每次执行 Scrape / Enhance / Normalize 之前，插件会按**操�
 copy worker\config.yaml.template worker\config.yaml
 ```
 
-### 13.3 编译
+### 15.3 编译
 
 #### 本地开发（自动部署到 foobar2000）
 
@@ -1135,7 +1497,7 @@ cmake -B out/build -G "Visual Studio 17 2022" -A x64
 cmake --build out/build --config Release -- /m
 ```
 
-### 13.4 打包发布
+### 15.4 打包发布
 
 使用 `tools/pack.ps1` 脚本打包：
 
@@ -1175,7 +1537,7 @@ foo_metadata_enhancer-1.0.0.zip
         └── ...
 ```
 
-### 13.5 CMake 可配置变量
+### 15.5 CMake 可配置变量
 
 | 变量 | 说明 | 默认值 |
 |------|------|--------|
@@ -1192,7 +1554,7 @@ cmake -B out/build ^
     -DFOOBAR_DEV_DIR="C:/foobar2000"
 ```
 
-### 13.6 安装发布包
+### 15.6 安装发布包
 
 1. 解压 `foo_metadata_enhancer-x.x.x.zip`
 2. 将 `foo_metadata_enhancer.dll` 和 `foo_metadata_enhancer` 文件夹复制到 foobar2000 的 `components/` 目录
@@ -1234,6 +1596,19 @@ cmake -B out/build ^
 ---
 
 ## 更新日志
+
+### v1.3.0 (Worker 通信与配置架构)
+
+- **进度消息协议**：新增 `type="progress"` IPC 消息类型，Python Worker 在长耗时操作（AI 调用、网络重试）期间定期发送进度上报，C++ 端刷新 `send_time` 避免误判卡死并强制重启（见 [12.3 进度消息协议](#123-进度消息协议progress-message)）
+- **独立 ipc_utils 模块**：把 `write_progress`、stdout 写入锁、`_current_request_id` 抽到 `worker/ipc_utils.py`，解决 `ai_worker.py` 作为 `__main__` 运行时跨模块导入失败问题（见 [12.4 独立的 ipc_utils 模块](#124-独立的-ipc_utils-模块)）
+- **Provider 配置独立存储**：每个 Provider 维护独立的 `api_key` 与 `selected_model`，切换 Provider 时自动保存旧 Provider 的 API Key 并恢复新 Provider 的 API Key，无需每次手动输入（见 [6.1.2 Provider 切换与 API Key 自动保存机制](#612-provider-切换与-api-key-自动保存机制)）
+- **异步 Worker 重启**：`apply` 中检测到 provider/api_key/model 变更时，通过 `std::thread(...).detach()` 在后台线程执行 `restart_all_workers()`，避免阻塞 UI 线程导致 fb2k 卡死（见 [6.1.3 Provider 变更后的 Worker 重启策略](#613-provider-变更后的-worker-重启策略)）
+- **配置合并机制**：Python 端 `ConfigManager` 启动时从 `config.yaml` 加载默认配置，并合并 C++ 端保存的 `settings.json` 中的用户偏好（provider、api_key、selected_model、batch_size、prompts.user_prefs 等），实现"开发者默认值 + 用户偏好"双层配置（见 [13. 配置系统](#13-配置系统)）
+- **Test API 使用 UI 参数**：`process_test_api` 不再读 config 默认值，而是使用 UI 传入的 provider/model 临时构造 Provider 实例，保证测试结果与 UI 当前选择一致（见 [13.5 测试 API 的配置来源](#135-测试-api-的配置来源)）
+- **缓存命中计数器**：`scrape_cache` / `enhance_cache` 表的 `cache_hit_count` 字段在每次 cache hit 时累加，`menu_handler` 在 cache hit 时跳过 `save_scrape_cache` 避免 `INSERT OR REPLACE` 重置计数器（见 [9.4 cache_hit_count 累加机制](#94-cache_hit_count-累加机制)）
+- **缓存统计实时计算**：`get_statistics()` 实时查询 `SUM(cache_hit_count)` 跨两个表，`cache_statistics` 表仅作为快照不参与计算，确保统计始终与缓存表内容一致（见 [9.5 缓存统计的实时计算](#95-缓存统计的实时计算)）
+- **双日志文件**：`core.log`（C++ 端）和 `worker.log`（Python 端）分离，便于区分问题来源（见 [11.1 日志位置与分类](#111-日志位置与分类)）
+- **日志级别动态调整**：修改 Logging Level 后通过 `update_worker_log_level` IPC 通知 Python Worker，无需重启进程即可生效
 
 ### v1.2.0 (V8.2 三功能分界)
 

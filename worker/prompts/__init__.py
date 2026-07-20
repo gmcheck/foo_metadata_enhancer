@@ -12,8 +12,8 @@ Prompts Package
 - provider_profiles.py Provider 差异 Profile
 - composer.py         三层组装器（核心入口）
 - base.py             旧函数薄包装（向后兼容）
-- stage1_prompts.py   旧常量别名（向后兼容）
-- stage2_prompts.py   旧常量别名（向后兼容）
+- scrape_prompts.py   Scrape 层常量别名（向后兼容）
+- enhance_prompts.py  Enhance 层常量别名（向后兼容）
 - fallback_prompts.py 旧常量别名 + build_inference_prompt（向后兼容）
 """
 
@@ -50,11 +50,11 @@ from .domain_defaults import (
 )
 
 # ===== 向后兼容（旧 API，保持调用方零改动）=====
-from .stage1_prompts import (
+from .scrape_prompts import (
     BATCH_RESOLVE_SYSTEM_PROMPT,
     BATCH_ENHANCED_SYSTEM_PROMPT,
 )
-from .stage2_prompts import (
+from .enhance_prompts import (
     BATCH_ENHANCE_SYSTEM_PROMPT,
 )
 from .fallback_prompts import (

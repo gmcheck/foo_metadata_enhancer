@@ -68,7 +68,7 @@ CONFIDENCE_GUIDELINES = """Confidence Guidelines:
 # Stage 1 输出 Schema（决策结果）
 # =============================================================================
 
-STAGE1_OUTPUT_SCHEMA = """Return JSON format (array of results):
+SCRAPE_OUTPUT_SCHEMA = """Return JSON format (array of results):
 [
     {
         "track_id": "EXACT_COPY_OF_INPUT_TRACK_ID",
@@ -90,7 +90,7 @@ STAGE1_OUTPUT_SCHEMA = """Return JSON format (array of results):
     }
 ]"""
 
-STAGE1_ENHANCED_OUTPUT_SCHEMA = """Return JSON format (array of results):
+SCRAPE_ENHANCED_OUTPUT_SCHEMA = """Return JSON format (array of results):
 [
     {
         "track_id": "EXACT_COPY_OF_INPUT_TRACK_ID",
@@ -117,7 +117,7 @@ STAGE1_ENHANCED_OUTPUT_SCHEMA = """Return JSON format (array of results):
 # Stage 2 输出 Schema（仅翻译）
 # =============================================================================
 
-STAGE2_OUTPUT_SCHEMA = """Return JSON format (array of results):
+ENHANCE_OUTPUT_SCHEMA = """Return JSON format (array of results):
 [
     {
         "track_id": "original track_id from input",
@@ -128,8 +128,8 @@ STAGE2_OUTPUT_SCHEMA = """Return JSON format (array of results):
     }
 ]
 
-Note: Stage2 ONLY performs metadata translation (deriving new value from existing data).
-Genre (a factual attribute) is now sourced from MusicBrainz in Stage1.
+Note: Enhance ONLY performs metadata translation (deriving new value from existing data).
+Genre (a factual attribute) is now sourced from MusicBrainz in Scrape.
 Edition identification has been removed (was unreliable from AI inference).
 
 TRANSLATION IS MANDATORY for non-Chinese content:

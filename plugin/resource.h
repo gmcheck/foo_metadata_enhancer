@@ -19,8 +19,10 @@
 #define IDD_PREFERENCES              100
 #define IDD_PREF_GENERAL             108
 #define IDD_PREF_DATA_SOURCES        109
-#define IDD_PREF_ADVANCED            110
+#define IDD_PREF_ADVANCED            110   // reserved: legacy compat (no longer registered)
 #define IDD_PREF_PROMPTS             111
+#define IDD_PREF_PROCESSING          112
+#define IDD_PREF_CACHE_LOGS          113
 #define IDD_BATCH_SETTINGS           101
 #define IDD_COMPLETION               102
 #define IDD_ERROR                    103
@@ -47,6 +49,7 @@
 #define IDC_ELAPSED_TIME             1107
 #define IDC_TOKENS_USED              1108
 #define IDC_DETAILS_LABEL            1109
+#define IDC_DETAILS_EDIT             1110
 
 #define IDC_GROUP_ERROR              1201
 #define IDC_ERROR_TITLE              1202
@@ -54,7 +57,12 @@
 #define IDC_ERROR_DETAILS            1204
 #define IDC_RETRY_BTN                1205
 #define IDC_VIEW_LOG_BTN             1206
-#define IDC_DETAILS_TEXT            1207
+#define IDC_DETAILS_TEXT             1207
+#define IDC_ERROR_CATEGORY           1208
+#define IDC_ERROR_ICON               1209
+#define IDC_ERROR_SUGGESTION         1210
+#define IDC_OPEN_SETTINGS_BTN        1211
+#define IDC_COPY_ERROR_BTN           1212
 
 #define IDC_GROUP_CACHE_STATS        1301
 #define IDC_CACHE_TOTAL_ENTRIES      1302
@@ -238,7 +246,7 @@
 #define IDI_ICON                     3001
 #define IDB_LOGO                     3002
 
-// ===== AI Prompt 偏好页面控件（IDD_PREF_PROMPTS）=====
+// ===== AI Prompt preference page controls (IDD_PREF_PROMPTS) =====
 #define IDC_GROUP_PROMPTS            3200
 #define IDC_TRANSLATION_STYLE_LABEL  3201
 #define IDC_TRANSLATION_STYLE        3202
@@ -258,7 +266,7 @@
 #define IDC_CUSTOM_INSTRUCTIONS      3216
 #define IDC_EXPORT_TEMPLATES_BTN     3217
 
-// ===== Normalize 对话框 =====
+// ===== Normalize dialogs =====
 #define IDD_NORMALIZE_FIELD          3070
 #define IDD_NORMALIZE_CONFIRM        3071
 #define IDD_NORMALIZE_EDIT           3072
@@ -278,6 +286,14 @@
 #define IDC_HINT_CHECKED             3234
 #define IDC_NORMALIZE_TOP_HINT       3235
 #define IDC_NORMALIZE_UNCERTAIN_HINT 3236
+#define IDC_FILTER_LOW_CONF          3237
+#define IDC_CONF_THRESHOLD           3238
+#define IDC_CONF_LESS_THAN           3239
+#define IDC_SORT_CONF                3240
+#define IDC_ENH_FILTER_LOW_CONF      3241
+#define IDC_ENH_CONF_THRESHOLD       3242
+#define IDC_ENH_CONF_LESS_THAN       3243
+#define IDC_ENH_SORT_CONF            3244
 
 // Rollback type selection dialog
 #define IDD_ROLLBACK_TYPE_SELECT     3073

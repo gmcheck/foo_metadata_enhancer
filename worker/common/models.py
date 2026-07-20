@@ -6,7 +6,7 @@ Pydantic Models for AI Metadata Plugin (V8.2 单一来源)
 本模块仅定义 IPC 边界（ai_worker.py ↔ C++ ai_core.cpp）的 JSON 校验模型。
 
 V8.2 数据模型统一边界：
-  - IPC 边界模型（本文件）：Stage1Scraping* / Stage2Enhancement* / IPCResponse
+  - IPC 边界模型（本文件）：Scrape* / Enhance* / IPCResponse
   - 运行时 dataclass 模型：core/types.py（TrackInput）、data_sources/base.py
     （Candidate / FinalResult / QueryInput / ScrapingOptions / EnhancementOptions /
     DataSourceType / FallbackLevel）
@@ -62,11 +62,11 @@ class IPCResponse(BaseModel):
 
 
 # =============================================================================
-# Stage1（Scrape 层）IPC 模型
+# Scrape 层IPC 模型
 # =============================================================================
 
-class Stage1ScrapedFieldModel(BaseModel):
-    """Stage1 刮削字段模型 - 与 C++ 端格式完全匹配
+class ScrapeFieldModel(BaseModel):
+    """Scrape 刮削字段模型 - 与 C++ 端格式完全匹配
 
     Attributes:
         value: 字段值
@@ -93,19 +93,19 @@ class Stage1ScrapedFieldModel(BaseModel):
         return v
 
 
-class Stage1ScrapingResultModel(BaseModel):
-    """Stage1 刮削结果模型 - 单首音轨的刮削结果
+class ScrapeResultModel(BaseModel):
+    """Scrape 刮削结果模型 - 单首音轨的刮削结果
 
     Attributes:
         track_id: 音轨ID
         success: 是否成功
-        scraped_fields: 刮削字段字典，键为字段名，值为 Stage1ScrapedFieldModel
+        scraped_fields: 刮削字段字典，键为字段名，值为 ScrapeFieldModel
         release_source: 主来源标识
         error: 错误信息（可选）
     """
     track_id: str = ""
     success: bool = False
-    scraped_fields: Dict[str, Stage1ScrapedFieldModel] = {}
+    scraped_fields: Dict[str, ScrapeFieldModel] = {}
     release_source: str = "ai"
     error: Optional[str] = None
 
@@ -129,8 +129,8 @@ class Stage1ScrapingResultModel(BaseModel):
         return result
 
 
-class Stage1ScrapingResponseModel(BaseModel):
-    """Stage1 刮削响应模型 - IPC 响应包装
+class ScrapeResponseModel(BaseModel):
+    """Scrape 刮削响应模型 - IPC 响应包装
 
     Attributes:
         version: 协议版本
@@ -143,7 +143,7 @@ class Stage1ScrapingResponseModel(BaseModel):
     version: int = 1
     id: str = ""
     success: bool = False
-    results: List[Stage1ScrapingResultModel] = []
+    results: List[ScrapeResultModel] = []
     error: Optional[Dict[str, Any]] = None
     timestamp: str = ""
 
@@ -171,14 +171,14 @@ class Stage1ScrapingResponseModel(BaseModel):
         return result
 
 
-def create_stage1_scraping_result(
+def create_scrape_result(
     track_id: str,
     success: bool,
     scraped_fields: Dict[str, Any],
     release_source: str = "ai",
     error: Optional[str] = None
-) -> Stage1ScrapingResultModel:
-    """创建 Stage1 刮削结果
+) -> ScrapeResultModel:
+    """创建 Scrape 刮削结果
 
     Args:
         track_id: 音轨ID
@@ -188,18 +188,18 @@ def create_stage1_scraping_result(
         error: 错误信息
 
     Returns:
-        Stage1ScrapingResultModel: Stage1 刮削结果实例
+        ScrapeResultModel: Scrape 刮削结果实例
     """
-    fields: Dict[str, Stage1ScrapedFieldModel] = {}
+    fields: Dict[str, ScrapeFieldModel] = {}
     for key, val in scraped_fields.items():
         if isinstance(val, dict):
-            fields[key] = Stage1ScrapedFieldModel(**val)
-        elif isinstance(val, Stage1ScrapedFieldModel):
+            fields[key] = ScrapeFieldModel(**val)
+        elif isinstance(val, ScrapeFieldModel):
             fields[key] = val
         else:
-            fields[key] = Stage1ScrapedFieldModel(value=str(val))
+            fields[key] = ScrapeFieldModel(value=str(val))
 
-    return Stage1ScrapingResultModel(
+    return ScrapeResultModel(
         track_id=track_id,
         success=success,
         scraped_fields=fields,
@@ -208,17 +208,17 @@ def create_stage1_scraping_result(
     )
 
 
-def create_stage1_error_result(track_id: str, error_message: str) -> Stage1ScrapingResultModel:
-    """创建 Stage1 错误结果
+def create_scrape_error_result(track_id: str, error_message: str) -> ScrapeResultModel:
+    """创建 Scrape 错误结果
 
     Args:
         track_id: 音轨ID
         error_message: 错误消息
 
     Returns:
-        Stage1ScrapingResultModel: 包含错误信息的刮削结果
+        ScrapeResultModel: 包含错误信息的刮削结果
     """
-    return Stage1ScrapingResultModel(
+    return ScrapeResultModel(
         track_id=track_id,
         success=False,
         scraped_fields={},
@@ -228,18 +228,18 @@ def create_stage1_error_result(track_id: str, error_message: str) -> Stage1Scrap
 
 
 # =============================================================================
-# Stage2（Enhancer 层）IPC 模型
+# Enhancer 层IPC 模型
 # =============================================================================
 
-class Stage2EnhancementResultModel(BaseModel):
-    """Stage2 增强结果模型 - 与 C++ 端格式完全匹配
+class EnhanceResultModel(BaseModel):
+    """Enhance 增强结果模型 - 与 C++ 端格式完全匹配
 
-    这是 C++ ai_core.cpp 中 stage2_enhance_sync 期望的响应格式。
+    这是 C++ ai_core.cpp 中 enhance_sync 期望的响应格式。
 
     V8.2: genre / edition 字段已移除。
-    - genre 改由 Stage1 从 MusicBrainz 抓取
+    - genre 改由 Scrape 从 MusicBrainz 抓取
     - edition 已废弃（AI 推断不可靠）
-    Stage2 仅保留翻译结果。
+    Enhance 仅保留翻译结果。
 
     Attributes:
         track_id: 音轨ID
@@ -262,6 +262,7 @@ class Stage2EnhancementResultModel(BaseModel):
     model: str = ""
     model_type: str = ""
     tokens_used: int = 0
+    cache_hit: bool = False
     error: Optional[str] = None
 
     @field_validator('translation_confidence', mode='before')
@@ -286,15 +287,16 @@ class Stage2EnhancementResultModel(BaseModel):
             "translation_confidence": self.translation_confidence,
             "model": self.model,
             "model_type": self.model_type,
-            "tokens_used": self.tokens_used
+            "tokens_used": self.tokens_used,
+            "cache_hit": self.cache_hit
         }
         if self.error:
             result["error"] = self.error
         return result
 
 
-class Stage2EnhancementResponseModel(BaseModel):
-    """Stage2 增强响应模型 - IPC 响应包装
+class EnhanceResponseModel(BaseModel):
+    """Enhance 增强响应模型 - IPC 响应包装
 
     Attributes:
         version: 协议版本
@@ -307,7 +309,7 @@ class Stage2EnhancementResponseModel(BaseModel):
     version: int = 1
     id: str = ""
     success: bool = False
-    results: List[Stage2EnhancementResultModel] = []
+    results: List[EnhanceResultModel] = []
     error: Optional[Dict[str, Any]] = None
     timestamp: str = ""
 
@@ -335,7 +337,7 @@ class Stage2EnhancementResponseModel(BaseModel):
         return result
 
 
-def create_stage2_enhancement_result(
+def create_enhance_result(
     track_id: str,
     success: bool,
     title_zh: str = "",
@@ -346,8 +348,8 @@ def create_stage2_enhancement_result(
     model_type: str = "",
     tokens_used: int = 0,
     error: Optional[str] = None
-) -> Stage2EnhancementResultModel:
-    """创建 Stage2 增强结果
+) -> EnhanceResultModel:
+    """创建 Enhance 增强结果
 
     Args:
         track_id: 音轨ID
@@ -362,9 +364,9 @@ def create_stage2_enhancement_result(
         error: 错误信息
 
     Returns:
-        Stage2EnhancementResultModel: Stage2 增强结果实例
+        EnhanceResultModel: Enhance 增强结果实例
     """
-    return Stage2EnhancementResultModel(
+    return EnhanceResultModel(
         track_id=track_id,
         success=success,
         title_zh=title_zh,
@@ -378,17 +380,17 @@ def create_stage2_enhancement_result(
     )
 
 
-def create_stage2_error_result(track_id: str, error_message: str) -> Stage2EnhancementResultModel:
-    """创建 Stage2 错误结果
+def create_enhance_error_result(track_id: str, error_message: str) -> EnhanceResultModel:
+    """创建 Enhance 错误结果
 
     Args:
         track_id: 音轨ID
         error_message: 错误消息
 
     Returns:
-        Stage2EnhancementResultModel: 包含错误信息的增强结果
+        EnhanceResultModel: 包含错误信息的增强结果
     """
-    return Stage2EnhancementResultModel(
+    return EnhanceResultModel(
         track_id=track_id,
         success=False,
         error=error_message

@@ -30,16 +30,18 @@ public:
     void warning(const std::string& message, const char* file = nullptr, const char* func = nullptr);
     
     void error(const std::string& message, const char* file = nullptr, const char* func = nullptr);
-    
+
+    /** 获取当前日志文件完整路径（供 UI 调用，如 "View Log" 按钮） */
+    std::string get_log_file_path();
+
 private:
+
     Logger();
-    
+
     ~Logger();
-    
+
     void log_to_file(constants::LogLevel level, const std::string& message,
                      const char* file = nullptr, const char* func = nullptr);
-    
-    std::string get_log_file_path();
     
     std::string extract_filename(const char* file_path);
     

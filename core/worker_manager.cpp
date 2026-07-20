@@ -3,6 +3,7 @@
 #include "../include/constants.h"
 #include <nlohmann/json.hpp>
 #include <algorithm>
+#include <cstdio>
 #include <fstream>
 #include <chrono>
 #include <iomanip>
@@ -251,7 +252,33 @@ bool WorkerManager::start_worker_locked() {
     
     std::string cmd = "\"" + python_exe + "\" -u \"" + worker_path_ + "\"";
     Logger::instance().debug("start_worker: Command = " + cmd, __FILE__, __FUNCTION__);
-    
+
+    // 构造子进程环境块：注入 FOO_METADATA_LOG_DIR，让 Python worker 把日志写到
+    // 与 C++ 相同的目录（{components}/foo_metadata_enhancer/logs）
+    std::string log_dir_env;
+    {
+        // 复用 Logger 已确定的日志目录（Logger::get_log_file_path 内部已创建目录）
+        std::string core_log_path = Logger::instance().get_log_file_path();
+        if (!core_log_path.empty()) {
+            size_t pos = core_log_path.find_last_of("\\/");
+            if (pos != std::string::npos) {
+                log_dir_env = "FOO_METADATA_LOG_DIR=" + core_log_path.substr(0, pos);
+            }
+        }
+    }
+
+    // 通过 SetEnvironmentVariableA 在当前进程设置（子进程会继承）
+    // 简单可靠，避免手动构造环境块的复杂性
+    if (!log_dir_env.empty()) {
+        size_t eq = log_dir_env.find('=');
+        if (eq != std::string::npos) {
+            std::string key = log_dir_env.substr(0, eq);
+            std::string val = log_dir_env.substr(eq + 1);
+            SetEnvironmentVariableA(key.c_str(), val.c_str());
+            Logger::instance().info("start_worker: set " + key + "=" + val);
+        }
+    }
+
     BOOL result = CreateProcessA(
         nullptr,
         const_cast<char*>(cmd.c_str()),
@@ -259,7 +286,7 @@ bool WorkerManager::start_worker_locked() {
         nullptr,
         TRUE,
         CREATE_NO_WINDOW,
-        nullptr,
+        nullptr,  // nullptr = 继承父进程环境变量
         nullptr,
         &si,
         &pi
@@ -461,15 +488,34 @@ void WorkerManager::worker_read_loop() {
 void WorkerManager::process_worker_response(const std::string& response) {
     Logger::instance().debug("process_worker_response: Response size = " + std::to_string(response.size()), __FILE__, __FUNCTION__);
     Logger::instance().debug("process_worker_response: Response preview = " + response.substr(0, (std::min)(size_t(500), response.size())), __FILE__, __FUNCTION__);
-    
+
     try {
         auto json = nlohmann::json::parse(response);
         std::string request_id = json.value("id", "");
-        
-        Logger::instance().debug("process_worker_response: Request ID = " + request_id + 
-            ", Success = " + std::to_string(json.value("success", false)) + 
+
+        // ===== 进度消息处理 =====
+        // Python 在长耗时操作（如 AI 调用）期间会发送 type=progress 消息，
+        // 用于刷新 send_time，避免 max_silence_time_ms 误判导致 worker 被强制重启。
+        // progress 消息不删除 pending request，也不触发回调。
+        std::string msg_type = json.value("type", "");
+        if (msg_type == "progress") {
+            std::string msg = json.value("message", "");
+            float progress = json.value("progress", 0.0f);
+            Logger::instance().info("process_worker_response: [progress] id=" + request_id +
+                ", progress=" + std::to_string(progress) + ", message=" + msg, __FILE__, __FUNCTION__);
+
+            std::lock_guard<std::mutex> lock(pending_mutex_);
+            auto it = pending_requests_.find(request_id);
+            if (it != pending_requests_.end()) {
+                it->second.send_time = GetTickCount();
+            }
+            return;
+        }
+
+        Logger::instance().debug("process_worker_response: Request ID = " + request_id +
+            ", Success = " + std::to_string(json.value("success", false)) +
             ", Count = " + std::to_string(json.value("count", 0)), __FILE__, __FUNCTION__);
-        
+
         if (!request_id.empty()) {
             ResultCallback callback;
             ErrorCallback error_callback;
@@ -701,11 +747,24 @@ std::vector<WorkerInfo> WorkerManager::get_worker_info() const {
 }
 
 void WorkerManager::restart_worker() {
+    LOG_INFO("restart_worker: enter");
     std::lock_guard<std::mutex> lock(worker_mutex_);
-    
+    {
+        char buf[128];
+        std::snprintf(buf, sizeof(buf), "restart_worker: lock acquired, worker_=%p", (void*)worker_.get());
+        LOG_INFO(buf);
+    }
+
     if (worker_) {
+        LOG_INFO("restart_worker: stopping existing worker");
         stop_worker_locked();
-        start_worker_locked();
+        LOG_INFO("restart_worker: stopped, now starting new worker");
+        bool ok = start_worker_locked();
+        LOG_INFO(ok ? "restart_worker: start_worker_locked returned true" : "restart_worker: start_worker_locked returned false");
+    } else {
+        LOG_INFO("restart_worker: worker_ is null, calling start_worker_locked to create one");
+        bool ok = start_worker_locked();
+        LOG_INFO(ok ? "restart_worker: start_worker_locked returned true (from null)" : "restart_worker: start_worker_locked returned false (from null)");
     }
 }
 

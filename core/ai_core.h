@@ -5,13 +5,13 @@
 // =============================================================================
 // 本头文件通过 AICore 暴露三个同步入口，对应三个互不重叠的功能层：
 //
-//   1. Scrape    (stage1_scrape_sync)
+//   1. Scrape    (scrape_sync)
 //      - 职责：从外部数据源获取本地没有的数据（事实获取）
 //      - 数据源：MusicBrainz / Discogs / AI 降级
 //      - 产物：title / artist / album / year / genre / composer / ... / musicbrainz_id
 //      - V8.2 变更：genre 改由本层从 MusicBrainz recording 详情获取
 //
-//   2. Enhancer  (stage2_enhance_sync)
+//   2. Enhancer  (enhance_sync)
 //      - 职责：基于已有元数据生成新价值（不获取新事实）
 //      - 当前能力：中文翻译（title_zh / album_zh / artist_zh）
 //      - V8.2 变更：移除 edition 识别（AI 推断不可靠）；genre 不再由本层产出
@@ -63,14 +63,14 @@ public:
     
     void shutdown();
     
-    std::vector<TrackScrapingResult> stage1_scrape_sync(
+    std::vector<TrackScrapingResult> scrape_sync(
         const std::vector<TrackInput>& tracks,
         const ScrapingOptions& options,
         ProgressCallback on_progress = nullptr,
         AbortCallback on_abort = nullptr
     );
-    
-    std::vector<EnhancementResult> stage2_enhance_sync(
+
+    std::vector<EnhancementResult> enhance_sync(
         const std::vector<TrackInput>& tracks,
         const EnhancementOptions& options,
         ProgressCallback on_progress = nullptr,
@@ -176,21 +176,21 @@ public:
     
     bool has_snapshot(const std::string& track_id);
     
-    void save_stage1_cache(
+    void save_scrape_cache(
         const std::string& cache_key,
         const TrackScrapingResult& result,
         const TrackInput& input
     );
-    
-    void save_stage2_cache(
+
+    void save_enhance_cache(
         const std::string& cache_key,
         const EnhancementResult& result,
         const TrackInput& input,
         const EnhancementOptions& options
     );
-    
-    std::string generate_stage1_cache_key(const TrackInput& input);
-    std::string generate_stage2_cache_key(const TrackInput& input, const EnhancementOptions& options);
+
+    std::string generate_scrape_cache_key(const TrackInput& input);
+    std::string generate_enhance_cache_key(const TrackInput& input, const EnhancementOptions& options);
     
     /**
      * @brief 检查是否已初始化
@@ -254,8 +254,15 @@ public:
      * @param size 每批处理的音轨数
      */
     void set_taskqueue_batch_size(uint32_t size) { batch_size_ = size; }
-    
+
     void set_ai_batch_size(uint32_t size) { ai_batch_size_ = size; }
+
+    /**
+     * @brief 设置缓存启用状态
+     * @param enabled true 启用缓存读写，false 完全跳过缓存
+     */
+    void set_cache_enabled(bool enabled) { cache_enabled_ = enabled; }
+    bool is_cache_enabled() const { return cache_enabled_; }
     
     /**
      * @brief 动态更新Worker的日志级别（无需重启worker）
@@ -342,6 +349,7 @@ private:
     
     uint32_t batch_size_ = constants::DEFAULT_BATCH_SIZE;
     uint32_t ai_batch_size_ = constants::DEFAULT_AI_BATCH_SIZE;
+    bool cache_enabled_ = true;  ///< 缓存启用状态，受 PluginSettings.cache_enabled 控制
     
     std::atomic<bool> initialized_{false};
     std::atomic<bool> processing_{false};

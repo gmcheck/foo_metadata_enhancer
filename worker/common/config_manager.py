@@ -206,7 +206,7 @@ class ConfigManager:
         """初始化配置管理器，加载配置文件"""
         if self._config is None:
             self._load_config()
-    
+
     def _load_config(self) -> None:
         """加载配置文件
         
@@ -472,8 +472,15 @@ def setup_logging(config: Optional[Dict[str, Any]] = None) -> logging.Logger:
     backup_count = log_config.get("backup_count", 5)
     
     script_dir = Path(__file__).parent.resolve()
-    log_dir = script_dir.parent.parent / "logs"
-    
+
+    # 优先使用 C++ 注入的 FOO_METADATA_LOG_DIR 环境变量（确保日志统一写到
+    # components/foo_metadata_enhancer/logs，与 C++ 端 core.log 同目录）
+    env_log_dir = os.environ.get("FOO_METADATA_LOG_DIR")
+    if env_log_dir:
+        log_dir = Path(env_log_dir)
+    else:
+        log_dir = script_dir.parent.parent / "logs"
+
     try:
         log_dir.mkdir(parents=True, exist_ok=True)
     except Exception as e:

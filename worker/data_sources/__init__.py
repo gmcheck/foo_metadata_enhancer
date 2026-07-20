@@ -12,8 +12,8 @@ Provides unified interface for multiple metadata sources
 - DataSourceManager : 统一调度多个数据源（含降级策略）
 - MusicBrainzAdapter: MusicBrainz 适配器（V8.2 起负责 genre 抓取）
 - DiscogsAdapter    : Discogs 适配器
-- ScrapingOptions   : Stage1 刮削选项
-- EnhancementOptions: Stage2 增强选项（翻译开关；V8.2 已移除 classify_genre/identify_edition）
+- ScrapingOptions   : Scrape 刮削选项
+- EnhancementOptions: Enhance 增强选项（翻译开关；V8.2 已移除 classify_genre/identify_edition）
 """
 
 from .base import (
