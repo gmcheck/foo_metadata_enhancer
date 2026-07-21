@@ -99,8 +99,8 @@ struct ProviderConfig {
  * @brief 插件设置结构体
  */
 struct PluginSettings {
-    AIProvider provider;                              ///< 当前提供商
-    std::map<AIProvider, ProviderConfig> provider_configs; ///< 提供商配置映射
+    AIProvider provider;                              ///< [legacy] 仅兼容旧 settings.json 读取，V1 不用
+    std::map<AIProvider, ProviderConfig> provider_configs; ///< [legacy] 仅兼容旧 settings.json 读取，V1 不用
     bool use_env_key;                                 ///< 是否使用环境变量密钥
     
     std::string python_path;                          ///< Python 可执行文件路径
@@ -331,18 +331,31 @@ private:
     void load_settings();
     void save_settings();
     void update_controls();
-    void on_provider_changed();
-    void update_model_combo();
-    void update_api_key_for_provider();
     void on_test_api();
     void on_open_log_folder();
     void on_clear_cache();
     void on_restart_workers();
     void on_browse_python();
+    void on_detect_python();
     void on_export_templates();
-    void on_custom_model_config();
     void on_changed();
     void update_worker_status_display();
+
+    // Providers V1 UI (IPC)
+    void refresh_provider_list();
+    void ensure_ai_core_ready();
+    std::string selected_provider_id() const;
+    void on_provider_add();
+    void on_provider_edit();
+    void on_provider_delete();
+    void on_provider_set_current();
+    void on_provider_restore_presets();
+    bool show_provider_edit_dialog(std::string& name,
+                                   std::string& protocol,
+                                   std::string& base_url,
+                                   std::string& api_key,
+                                   std::string& model,
+                                   bool is_new);
     
     HWND m_wnd;
     preferences_page_callback::ptr m_callback;
@@ -350,6 +363,8 @@ private:
     bool m_modified;
     int m_dialog_id;
     bool m_test_in_progress = false; ///< API测试是否进行中
+    std::string m_current_provider_id; ///< V1 current provider id (from IPC)
+    std::vector<std::string> m_provider_ids; ///< list row -> provider id
 };
 
 class AIPreferencePageRoot : public preferences_page_v3 {

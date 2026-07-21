@@ -1,4 +1,5 @@
 #include "preferences_page.h"
+#include <CommCtrl.h>
 #include "menu_handler.h"
 #include "resource.h"
 #include "../core/logger.h"
@@ -19,6 +20,67 @@
 #include <nlohmann/json.hpp>
 
 namespace ai_metadata {
+
+// 隐藏窗口执行命令并捕获输出（避免 _popen 弹出 cmd 窗口）
+static bool run_command_hidden_pref(const std::string& cmd, std::string& output, int* exit_code = nullptr) {
+    SECURITY_ATTRIBUTES sa;
+    sa.nLength = sizeof(SECURITY_ATTRIBUTES);
+    sa.bInheritHandle = TRUE;
+    sa.lpSecurityDescriptor = nullptr;
+
+    HANDLE hReadPipe = nullptr;
+    HANDLE hWritePipe = nullptr;
+    if (!CreatePipe(&hReadPipe, &hWritePipe, &sa, 0)) return false;
+    SetHandleInformation(hReadPipe, HANDLE_FLAG_INHERIT, 0);
+
+    STARTUPINFOA si;
+    ZeroMemory(&si, sizeof(si));
+    si.cb = sizeof(si);
+    si.hStdOutput = hWritePipe;
+    si.hStdError = hWritePipe;
+    si.dwFlags = STARTF_USESTDHANDLES;
+
+    PROCESS_INFORMATION pi;
+    ZeroMemory(&pi, sizeof(pi));
+
+    std::string cmd_line = cmd;
+    BOOL result = CreateProcessA(
+        nullptr,
+        const_cast<char*>(cmd_line.c_str()),
+        nullptr, nullptr,
+        TRUE,
+        CREATE_NO_WINDOW,
+        nullptr, nullptr,
+        &si, &pi
+    );
+    CloseHandle(hWritePipe);
+    if (!result) {
+        CloseHandle(hReadPipe);
+        return false;
+    }
+
+    char buffer[128];
+    DWORD bytes_read;
+    while (ReadFile(hReadPipe, buffer, sizeof(buffer) - 1, &bytes_read, nullptr) && bytes_read > 0) {
+        buffer[bytes_read] = '\0';
+        output += buffer;
+    }
+    CloseHandle(hReadPipe);
+
+    WaitForSingleObject(pi.hProcess, 30000); // 30s 超时
+
+    if (exit_code != nullptr) {
+        DWORD code = 0;
+        if (GetExitCodeProcess(pi.hProcess, &code)) {
+            *exit_code = static_cast<int>(code);
+        } else {
+            *exit_code = -1;
+        }
+    }
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+    return true;
+}
 
 static const UINT WM_FILL_COMBO_BOXES = WM_USER + 100;
 static const int FILL_COMBO_TIMER_ID = 1;
@@ -101,24 +163,13 @@ std::string SettingsManager::get_config_path() const {
 }
 
 std::string SettingsManager::get_api_key() const {
-    const auto& s = settings();
-    if (s.use_env_key) {
-        const char* env_key = std::getenv("OPENROUTER_API_KEY");
-        if (env_key) return env_key;
-    }
-    auto it = s.provider_configs.find(s.provider);
-    if (it != s.provider_configs.end()) {
-        return it->second.api_key;
-    }
+    // V1: API Key 在 Python SQLite providers 表；此方法仅兼容旧调用。
     return "";
 }
 
 std::vector<ModelInfo> SettingsManager::get_models_for_provider(AIProvider provider) const {
-    const auto& s = settings();
-    auto it = s.provider_configs.find(provider);
-    if (it != s.provider_configs.end()) {
-        return it->second.models;
-    }
+    // V1: 模型列表不再由 C++ settings 维护
+    (void)provider;
     return {};
 }
 
@@ -950,24 +1001,9 @@ void SettingsManager::save() {
     std::ofstream file(m_config_path);
     if (file.is_open()) {
         file << "{\n";
-        file << "  \"provider\": \"" << provider_to_string(m_settings.provider) << "\",\n";
-        file << "  \"use_env_key\": " << (m_settings.use_env_key ? "true" : "false") << ",\n";
+        // V1: providers 列表不再写入 settings.json（权威源为 Python SQLite）
         file << "  \"python_path\": \"" << m_settings.python_path << "\",\n";
         file << "  \"auto_install_packages\": " << (m_settings.auto_install_packages ? "true" : "false") << ",\n";
-        
-        file << "  \"provider_configs\": {\n";
-        bool first_provider = true;
-        for (const auto& [p, config] : m_settings.provider_configs) {
-            if (!first_provider) file << ",\n";
-            first_provider = false;
-            file << "    \"" << provider_to_string(p) << "\": {\n";
-            file << "      \"api_key\": \"" << config.api_key << "\",\n";
-            file << "      \"selected_model\": \"" << config.selected_model << "\",\n";
-            file << "      \"base_url\": \"" << config.base_url << "\",\n";
-            file << "      \"api_format\": \"" << config.api_format << "\"\n";
-            file << "    }";
-        }
-        file << "\n  },\n";
         
         file << "  \"cache_enabled\": " << (m_settings.cache_enabled ? "true" : "false") << ",\n";
         file << "  \"cache_expiration_days\": " << m_settings.cache_expiration_days << ",\n";
@@ -1036,48 +1072,39 @@ std::string SettingsManager::auto_detect_python_path() const {
         "/usr/local/bin/python3",
         "/opt/homebrew/bin/python3"
     };
-    
+
     for (const char* path : python_paths) {
         std::string test_cmd = std::string(path) + " --version 2>&1";
-        FILE* pipe = _popen(test_cmd.c_str(), "r");
-        if (pipe) {
-            char buffer[128];
-            std::string result;
-            while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
-                result += buffer;
-            }
-            _pclose(pipe);
-            
-            if (result.find("Python") != std::string::npos) {
-                log_format("[AI Metadata] auto_detect_python_path: Found Python at '", path, "' - ", result.c_str());
-                
-                if (std::string(path).find("\\") != std::string::npos || 
-                    std::string(path).find("/") != std::string::npos) {
-                    return path;
-                }
-                
-                char full_path[MAX_PATH] = {0};
-                std::string where_cmd = std::string("where ") + path + " 2>nul";
-                FILE* where_pipe = _popen(where_cmd.c_str(), "r");
-                if (where_pipe) {
-                    if (fgets(full_path, sizeof(full_path), where_pipe) != nullptr) {
-                        _pclose(where_pipe);
-                        size_t len = strlen(full_path);
-                        if (len > 0 && (full_path[len-1] == '\n' || full_path[len-1] == '\r')) {
-                            full_path[len-1] = '\0';
-                        }
-                        if (len > 1 && (full_path[len-2] == '\n' || full_path[len-2] == '\r')) {
-                            full_path[len-2] = '\0';
-                        }
-                        return std::string(full_path);
-                    }
-                    _pclose(where_pipe);
-                }
+        std::string result;
+        int exit_code = -1;
+        // 使用 CREATE_NO_WINDOW 避免弹出 cmd 窗口
+        if (!run_command_hidden_pref(test_cmd, result, &exit_code)) {
+            continue;
+        }
+        if (exit_code == 0 && result.find("Python") != std::string::npos) {
+            log_format("[AI Metadata] auto_detect_python_path: Found Python at '", path, "' - ", result.c_str());
+
+            if (std::string(path).find("\\") != std::string::npos ||
+                std::string(path).find("/") != std::string::npos) {
                 return path;
             }
+
+            // 用 where 解析完整路径（同样隐藏窗口）
+            std::string where_cmd = std::string("where ") + path + " 2>nul";
+            std::string where_out;
+            int where_exit = -1;
+            if (run_command_hidden_pref(where_cmd, where_out, &where_exit) && where_exit == 0) {
+                // 取第一行
+                size_t nl = where_out.find_first_of("\r\n");
+                std::string full_path = (nl == std::string::npos) ? where_out : where_out.substr(0, nl);
+                if (!full_path.empty()) {
+                    return full_path;
+                }
+            }
+            return path;
         }
     }
-    
+
     log_format("[AI Metadata] auto_detect_python_path: Python not found");
     return "";
 }
@@ -1221,8 +1248,6 @@ t_uint32 AIPreferencePageInstance::get_state() {
 void AIPreferencePageInstance::apply() {
     auto old_settings = SettingsManager::instance().settings();
     auto old_log_level = old_settings.log_level;
-    auto old_provider = old_settings.provider;
-    auto old_provider_configs = old_settings.provider_configs;
 
     save_settings();
     SettingsManager::instance().settings() = m_settings;
@@ -1244,45 +1269,7 @@ void AIPreferencePageInstance::apply() {
             ai_core->update_worker_log_level(level_name);
         }
 
-        // 检测 provider 或 api_key 或 selected_model 是否变更。
-        // 若变更则强制重启 Worker，让新配置在全新进程中生效。
-        // 不用 reload 是因为 ScrapeProcessor/AIResolver 等对象在请求处理时
-        // 才创建，但已缓存的 Provider 实例不会刷新，行为不可预测。
-        bool provider_changed = (m_settings.provider != old_provider);
-        bool api_key_or_model_changed = false;
-        for (const auto& [p, cfg] : m_settings.provider_configs) {
-            auto it = old_provider_configs.find(p);
-            if (it == old_provider_configs.end()) {
-                api_key_or_model_changed = true;
-                break;
-            }
-            if (cfg.api_key != it->second.api_key ||
-                cfg.selected_model != it->second.selected_model) {
-                api_key_or_model_changed = true;
-                break;
-            }
-        }
-
-        if (provider_changed || api_key_or_model_changed) {
-            Logger::instance().info("apply: provider/api_key/model changed, restarting worker",
-                                    __FILE__, __FUNCTION__);
-            // 异步重启 worker：restart_all_workers 内部会调 WaitForSingleObject
-            // 等待 worker 进程退出（最长 1 秒），如果在 UI 线程同步执行会与
-            // worker_read_loop 线程争抢 worker_mutex_ 导致 fb2k UI 卡死。
-            std::thread([ai_core]() {
-                try {
-                    ai_core->restart_all_workers();
-                    Logger::instance().info("apply: worker restart completed",
-                                            __FILE__, __FUNCTION__);
-                } catch (const std::exception& e) {
-                    Logger::instance().error(std::string("apply: worker restart failed: ") + e.what(),
-                                             __FILE__, __FUNCTION__);
-                } catch (...) {
-                    Logger::instance().error("apply: worker restart failed: unknown exception",
-                                             __FILE__, __FUNCTION__);
-                }
-            }).detach();
-        }
+        // V1: Provider 配置由 SQLite + providers IPC 即时生效，无需因 settings.json 重启 Worker
     }
 
     m_modified = false;
@@ -1336,7 +1323,6 @@ INT_PTR CALLBACK AIPreferencePageInstance::dialog_proc(HWND wnd, UINT msg, WPARA
             
         case WM_COMMAND:
             switch (LOWORD(wp)) {
-                case IDC_API_KEY:
                 case IDC_CACHE_EXPIRATION:
                 case IDC_CACHE_SIZE:
                 case IDC_BATCH_SIZE_PREF:
@@ -1357,7 +1343,6 @@ INT_PTR CALLBACK AIPreferencePageInstance::dialog_proc(HWND wnd, UINT msg, WPARA
                     }
                     break;
                     
-                case IDC_USE_ENV_KEY:
                 case IDC_ENABLE_CACHE:
                 case IDC_AUTO_CLEANUP:
                 case IDC_AUTO_RESTART:
@@ -1369,13 +1354,6 @@ INT_PTR CALLBACK AIPreferencePageInstance::dialog_proc(HWND wnd, UINT msg, WPARA
                     self->on_changed();
                     break;
                     
-                case IDC_PROVIDER:
-                    if (HIWORD(wp) == CBN_SELCHANGE) {
-                        self->on_provider_changed();
-                    }
-                    break;
-                    
-                case IDC_MODEL:
                 case IDC_LOG_LEVEL:
                     if (HIWORD(wp) == CBN_SELCHANGE) {
                         self->on_changed();
@@ -1386,8 +1364,24 @@ INT_PTR CALLBACK AIPreferencePageInstance::dialog_proc(HWND wnd, UINT msg, WPARA
                     self->on_test_api();
                     break;
 
+                case IDC_PROVIDER_ADD_BTN:
+                    self->on_provider_add();
+                    break;
+                case IDC_PROVIDER_EDIT_BTN:
+                    self->on_provider_edit();
+                    break;
+                case IDC_PROVIDER_DELETE_BTN:
+                    self->on_provider_delete();
+                    break;
+                case IDC_PROVIDER_SET_CURRENT_BTN:
+                    self->on_provider_set_current();
+                    break;
+                case IDC_PROVIDER_RESTORE_BTN:
+                    self->on_provider_restore_presets();
+                    break;
+
                 case IDC_CUSTOM_MODEL_CONFIG_BTN:
-                    self->on_custom_model_config();
+                    // legacy custom dialog removed from General page
                     break;
                     
                 case IDC_OPEN_LOG_BTN:
@@ -1404,6 +1398,10 @@ INT_PTR CALLBACK AIPreferencePageInstance::dialog_proc(HWND wnd, UINT msg, WPARA
                     
                 case IDC_PYTHON_BROWSE:
                     self->on_browse_python();
+                    break;
+
+                case IDC_PYTHON_DETECT:
+                    self->on_detect_python();
                     break;
 
                 case IDC_TRANSLATION_STYLE:
@@ -1452,30 +1450,22 @@ void AIPreferencePageInstance::on_init_dialog() {
 }
 
 void AIPreferencePageInstance::fill_combo_boxes() {
-    HWND combo = GetDlgItem(m_wnd, IDC_PROVIDER);
-    if (combo) {
-        SendMessageW(combo, CB_RESETCONTENT, 0, 0);
-        SendMessageW(combo, CB_INSERTSTRING, 0, (LPARAM)L"OpenRouter");
-        SendMessageW(combo, CB_INSERTSTRING, 1, (LPARAM)L"Zhipu (智谱)");
-        SendMessageW(combo, CB_INSERTSTRING, 2, (LPARAM)L"Gemini");
-        SendMessageW(combo, CB_INSERTSTRING, 3, (LPARAM)L"Ollama");
-        SendMessageW(combo, CB_INSERTSTRING, 4, (LPARAM)L"DeepSeek");
-        SendMessageW(combo, CB_INSERTSTRING, 5, (LPARAM)L"Custom");
-        SendMessageW(combo, CB_SETCURSEL, static_cast<int>(m_settings.provider), 0);
-        update_model_combo();
+    // V1: Provider 列表由 refresh_provider_list 填充
+    if (GetDlgItem(m_wnd, IDC_PROVIDER_LIST)) {
+        refresh_provider_list();
     }
 
     // 诊断日志：记录 fill_combo_boxes 调用及关键控件句柄
     {
         char diag[256];
         std::snprintf(diag, sizeof(diag),
-            "[PrefPage] fill_combo_boxes: wnd=%p IDC_PROVIDER=%p IDC_TRANSLATION_STYLE=%p",
-            (void*)m_wnd, (void*)GetDlgItem(m_wnd, IDC_PROVIDER),
+            "[PrefPage] fill_combo_boxes: wnd=%p IDC_PROVIDER_LIST=%p IDC_TRANSLATION_STYLE=%p",
+            (void*)m_wnd, (void*)GetDlgItem(m_wnd, IDC_PROVIDER_LIST),
             (void*)GetDlgItem(m_wnd, IDC_TRANSLATION_STYLE));
         Logger::instance().info(diag);
     }
-    
-    combo = GetDlgItem(m_wnd, IDC_LOG_LEVEL);
+
+    HWND combo = GetDlgItem(m_wnd, IDC_LOG_LEVEL);
     if (combo) {
         SendMessageW(combo, CB_RESETCONTENT, 0, 0);
         SendMessageW(combo, CB_INSERTSTRING, 0, (LPARAM)L"DEBUG");
@@ -1509,31 +1499,8 @@ void AIPreferencePageInstance::fill_combo_boxes() {
 }
 
 void AIPreferencePageInstance::update_controls() {
-    if (GetDlgItem(m_wnd, IDC_USE_ENV_KEY)) {
-        CheckDlgButton(m_wnd, IDC_USE_ENV_KEY, m_settings.use_env_key ? BST_CHECKED : BST_UNCHECKED);
-    }
-    
-    if (GetDlgItem(m_wnd, IDC_API_KEY)) {
-        update_api_key_for_provider();
-    }
-    
-    // 显示/隐藏 Custom 模型的 Config 按钮
-    HWND configBtn = GetDlgItem(m_wnd, IDC_CUSTOM_MODEL_CONFIG_BTN);
-    if (configBtn) {
-        bool isCustom = (m_settings.provider == AIProvider::Custom);
-        ShowWindow(configBtn, isCustom ? SW_SHOW : SW_HIDE);
-        // 当 Custom 选中时，显示当前配置摘要
-        if (isCustom) {
-            auto& custom_config = m_settings.provider_configs[AIProvider::Custom];
-            if (!custom_config.base_url.empty() || !custom_config.selected_model.empty()) {
-                std::string status = "Custom: " + custom_config.api_format + " | " +
-                                     custom_config.base_url + " | " +
-                                     custom_config.selected_model;
-                SetDlgItemTextA(m_wnd, IDC_STATUS_TEXT, status.c_str());
-            }
-        }
-    }
-    
+    // V1 providers UI: list is refreshed via refresh_provider_list
+
     if (GetDlgItem(m_wnd, IDC_PYTHON_PATH)) {
         SetDlgItemTextA(m_wnd, IDC_PYTHON_PATH, m_settings.python_path.c_str());
     }
@@ -1542,12 +1509,11 @@ void AIPreferencePageInstance::update_controls() {
     }
     
     if (GetDlgItem(m_wnd, IDC_PYTHON_STATUS)) {
-        std::string detected_python = SettingsManager::instance().get_python_path();
         std::string status_text = "Status: ";
-        if (!detected_python.empty()) {
-            status_text += detected_python;
+        if (!m_settings.python_path.empty()) {
+            status_text += m_settings.python_path;
         } else {
-            status_text += "Not detected";
+            status_text += "Not configured (click Detect)";
         }
         SetDlgItemTextA(m_wnd, IDC_PYTHON_STATUS, status_text.c_str());
     }
@@ -1644,102 +1610,13 @@ void AIPreferencePageInstance::update_controls() {
     }
 }
 
-void AIPreferencePageInstance::on_provider_changed() {
-    // 切换 provider 前必须先把当前输入框的 api_key 保存到旧 provider 的 config，
-    // 否则用户在旧 provider 输入的 api_key 会丢失。
-    if (GetDlgItem(m_wnd, IDC_API_KEY)) {
-        char buffer[512] = {0};
-        GetDlgItemTextA(m_wnd, IDC_API_KEY, buffer, sizeof(buffer));
-        m_settings.get_current_provider_config().api_key = buffer;
-    }
 
-    HWND combo = GetDlgItem(m_wnd, IDC_PROVIDER);
-    if (combo) {
-        m_settings.provider = static_cast<AIProvider>(ComboBox_GetCurSel(combo));
-    }
-    update_api_key_for_provider();
-    update_model_combo();
-    
-    // 更新 Config 按钮的可见性
-    HWND configBtn = GetDlgItem(m_wnd, IDC_CUSTOM_MODEL_CONFIG_BTN);
-    if (configBtn) {
-        ShowWindow(configBtn, (m_settings.provider == AIProvider::Custom) ? SW_SHOW : SW_HIDE);
-    }
-    
-    on_changed();
-}
 
-void AIPreferencePageInstance::update_api_key_for_provider() {
-    auto& config = m_settings.get_current_provider_config();
-    SetDlgItemTextA(m_wnd, IDC_API_KEY, config.api_key.c_str());
-}
-
-void AIPreferencePageInstance::update_model_combo() {
-    HWND combo = GetDlgItem(m_wnd, IDC_MODEL);
-    if (!combo) return;
-    
-    SendMessageW(combo, CB_RESETCONTENT, 0, 0);
-    
-    auto& config = m_settings.get_current_provider_config();
-    
-    int select_index = -1;
-    int current_index = 0;
-    bool found_selected = false;
-    
-    for (const auto& model : config.models) {
-        SendMessageA(combo, CB_INSERTSTRING, current_index, (LPARAM)model.name.c_str());
-        if (model.name == config.selected_model) {
-            select_index = current_index;
-            found_selected = true;
-        }
-        current_index++;
-    }
-    
-    // 如果保存的模型不在预定义列表中（自定义模型），添加到列表末尾
-    if (!found_selected && !config.selected_model.empty()) {
-        SendMessageA(combo, CB_INSERTSTRING, current_index, (LPARAM)config.selected_model.c_str());
-        select_index = current_index;
-    }
-    
-    if (select_index >= 0) {
-        SendMessageA(combo, CB_SETCURSEL, select_index, 0);
-    } else if (!config.models.empty()) {
-        SendMessageA(combo, CB_SETCURSEL, 0, 0);
-    }
-}
 
 void AIPreferencePageInstance::save_settings() {
     char buffer[256];
     
-    HWND combo = GetDlgItem(m_wnd, IDC_PROVIDER);
-    if (combo) {
-        m_settings.provider = static_cast<AIProvider>(ComboBox_GetCurSel(combo));
-    }
-    
-    if (GetDlgItem(m_wnd, IDC_API_KEY)) {
-        GetDlgItemTextA(m_wnd, IDC_API_KEY, buffer, sizeof(buffer));
-        m_settings.get_current_provider_config().api_key = buffer;
-    }
-    
-    combo = GetDlgItem(m_wnd, IDC_MODEL);
-    if (combo) {
-        auto& config = m_settings.get_current_provider_config();
-        int sel = ComboBox_GetCurSel(combo);
-        if (sel >= 0 && sel < (int)config.models.size()) {
-            config.selected_model = config.models[sel].name;
-        } else {
-            // 用户手动输入了自定义模型名
-            char model_buf[256] = {0};
-            GetWindowTextA(combo, model_buf, sizeof(model_buf));
-            if (model_buf[0] != '\0') {
-                config.selected_model = model_buf;
-            }
-        }
-    }
-    
-    if (GetDlgItem(m_wnd, IDC_USE_ENV_KEY)) {
-        m_settings.use_env_key = IsDlgButtonChecked(m_wnd, IDC_USE_ENV_KEY) == BST_CHECKED;
-    }
+    // V1: Provider 配置不经 settings.json，由 providers IPC 直接写 SQLite
     
     if (GetDlgItem(m_wnd, IDC_PYTHON_PATH)) {
         GetDlgItemTextA(m_wnd, IDC_PYTHON_PATH, buffer, sizeof(buffer));
@@ -1824,7 +1701,7 @@ void AIPreferencePageInstance::save_settings() {
         m_settings.enable_ai = IsDlgButtonChecked(m_wnd, IDC_ENABLE_AI) == BST_CHECKED;
     }
     
-    combo = GetDlgItem(m_wnd, IDC_LOG_LEVEL);
+    HWND combo = GetDlgItem(m_wnd, IDC_LOG_LEVEL);
     if (combo) {
         m_settings.log_level = static_cast<ai_metadata::constants::LogLevel>(ComboBox_GetCurSel(combo));
         Logger::instance().set_log_level(m_settings.log_level);
@@ -1865,130 +1742,76 @@ void AIPreferencePageInstance::save_settings() {
 }
 
 void AIPreferencePageInstance::on_test_api() {
-    // 防止重复点击
     if (m_test_in_progress) {
         return;
     }
 
-    // test_api 不需要落盘 settings.json：直接用 UI 当前选择的 provider/model/api_key
-    // 通过 params 传给 Python，process_test_api 会用这些参数创建临时 provider 实例。
-    // 真正的配置生效发生在用户点 Apply 时（触发 worker 重启）。
-    save_settings();
-
-    std::string api_key = m_settings.get_current_provider_config().api_key;
-    if (m_settings.use_env_key) {
-        const char* env_key = std::getenv("OPENROUTER_API_KEY");
-        if (env_key) api_key = env_key;
-    }
-    
-    if (api_key.empty()) {
-        SetDlgItemTextA(m_wnd, IDC_STATUS_TEXT, "[ERROR] No API key configured");
-        Feedback::warn("No API key configured. Please enter your API key in the AI Provider page.", "AI Metadata");
-        return;
-    }
-    
-    std::string model = m_settings.get_current_provider_config().selected_model;
-    std::string provider_name = provider_to_string(m_settings.provider);
-    
+    ensure_ai_core_ready();
     AICore* ai_core = get_ai_core_instance();
-    if (!ai_core) {
+    if (!ai_core || !ai_core->is_initialized()) {
         SetDlgItemTextA(m_wnd, IDC_STATUS_TEXT, "[ERROR] AI Core not initialized");
         Feedback::error("AI Core not initialized",
-                         "AI Core instance is null. This usually indicates the plugin failed to start.",
+                         "AI Core instance is null or failed to start.",
                          ErrorCategory::PythonWorker);
         return;
     }
-    
-    if (!ai_core->is_initialized()) {
-        // 设置数据库路径为 {fb2k_profile}/foo_metadata_enhancer/foo_metadata_enhancer.db
-        std::string profile_path = core_api::get_profile_path();
-        if (profile_path.find("file://") == 0) {
-            profile_path = profile_path.substr(7);
-        }
-        std::string sub_dir = profile_path + "\\foo_metadata_enhancer";
-        CreateDirectoryA(sub_dir.c_str(), NULL);
-        ai_core->set_cache_path(sub_dir + "\\" + constants::cache_db_name());
-        SetDlgItemTextA(m_wnd, IDC_STATUS_TEXT, "[1/3] Initializing AI Core...");
-        if (!ai_core->initialize()) {
-            SetDlgItemTextA(m_wnd, IDC_STATUS_TEXT, "[ERROR] Failed to initialize AI Core");
-            Feedback::error("Failed to initialize AI Core",
-                             "AI Core initialization failed. Check Python installation and worker path.",
-                             ErrorCategory::PythonWorker);
+
+    std::string pid = selected_provider_id();
+    if (pid.empty()) {
+        if (m_current_provider_id.empty()) {
+            SetDlgItemTextA(m_wnd, IDC_STATUS_TEXT, "[ERROR] No provider selected");
+            Feedback::warn("Please select a provider in the list first.", "AI Metadata");
             return;
         }
+        pid = m_current_provider_id;
     }
-    
-    // 标记测试进行中，禁用按钮
+
     m_test_in_progress = true;
     EnableWindow(GetDlgItem(m_wnd, IDC_TEST_API_BTN), FALSE);
-    
-    SetDlgItemTextA(m_wnd, IDC_STATUS_TEXT, "[2/3] Sending test request to AI provider (timeout: 30s)...");
+    SetDlgItemTextA(m_wnd, IDC_STATUS_TEXT, "Testing provider connection (timeout: 30s)...");
 
-    // 把当前 UI 配置一并传给 worker，避免 custom provider 依赖 worker 启动时的旧配置
-    const auto& current_cfg = m_settings.get_current_provider_config();
-    nlohmann::json provider_cfg;
-    provider_cfg["api_key"] = api_key;
-    provider_cfg["selected_model"] = model;
-    if (!current_cfg.base_url.empty()) {
-        provider_cfg["base_url"] = current_cfg.base_url;
-    }
-    if (!current_cfg.api_format.empty()) {
-        provider_cfg["api_format"] = current_cfg.api_format;
-        provider_cfg["extra_params"] = nlohmann::json{{"api_format", current_cfg.api_format}};
-    }
-    std::string provider_cfg_json = provider_cfg.dump();
-    
+    nlohmann::json params;
+    params["id"] = pid;
+    std::string params_json = params.dump();
     HWND wnd = m_wnd;
-    std::thread([wnd, ai_core, provider_name, model, provider_cfg_json, this]() {
-        std::string result_json = ai_core->test_api_connection(provider_name, model, 30000, provider_cfg_json);
-        
-        fb2k::inMainThread([wnd, result_json, provider_name, model, this]() {
+
+    std::thread([wnd, ai_core, params_json, pid, this]() {
+        std::string result_json = ai_core->providers_test(params_json, 30000);
+        fb2k::inMainThread([wnd, result_json, pid, this]() {
             if (!IsWindow(wnd)) {
                 m_test_in_progress = false;
                 return;
             }
-            
-            // 恢复按钮
             m_test_in_progress = false;
             EnableWindow(GetDlgItem(wnd, IDC_TEST_API_BTN), TRUE);
-            
             try {
+                // 契约: { success, status("success"|"failed"), data{}, error(""), error_category("") }
                 nlohmann::json result = nlohmann::json::parse(result_json);
-                
-                if (result["success"].get<bool>()) {
-                    std::string message = "API connection successful!\n\n";
-                    message += "Provider: " + provider_name + "\n";
-                    message += "Model: " + model + "\n";
-                    
-                    if (result.contains("result") && result["result"].is_object()) {
-                        auto& res = result["result"];
-                        if (res.contains("test_genre")) {
-                            message += "Test Genre: " + res["test_genre"].get<std::string>() + "\n";
-                        }
-                        if (res.contains("tokens_used")) {
-                            message += "Tokens Used: " + std::to_string(res["tokens_used"].get<int>()) + "\n";
-                        }
-                    }
-                    
-                    SetDlgItemTextA(wnd, IDC_STATUS_TEXT, "[3/3] API test: SUCCESS");
-                    Feedback::success(message);
+                const std::string status = result.value("status", result.value("success", false) ? "success" : "failed");
+                const bool ok = (status == "success") || result.value("success", false);
+                const auto& data = result.contains("data") && result["data"].is_object()
+                    ? result["data"]
+                    : nlohmann::json::object();
+                const std::string model = data.value("model", "");
+                const std::string provider_name = data.value("provider", "");
+                const std::string err = result.value("error", "");
+                const std::string cat = result.value("error_category", "");
+
+                if (ok) {
+                    std::string msg = "API connection successful!";
+                    if (!provider_name.empty()) msg += "\nProvider: " + provider_name;
+                    if (!model.empty()) msg += "\nModel: " + model;
+                    SetDlgItemTextA(wnd, IDC_STATUS_TEXT, "API test: SUCCESS");
+                    Feedback::success(msg);
                 } else {
-                    std::string error_msg = "API connection failed!\n\n";
-                    error_msg += "Provider: " + provider_name + "\n";
-                    error_msg += "Model: " + model + "\n";
-                    
-                    if (result.contains("error")) {
-                        error_msg += "Error: " + result["error"].get<std::string>();
-                    }
-                    
-                    SetDlgItemTextA(wnd, IDC_STATUS_TEXT, "[3/3] API test: FAILED");
-                    Feedback::warn(error_msg, "API Test Failed");
+                    std::string detail = err.empty() ? "Unknown error" : err;
+                    if (!cat.empty()) detail += " [" + cat + "]";
+                    SetDlgItemTextA(wnd, IDC_STATUS_TEXT, "API test: FAILED");
+                    Feedback::warn(std::string("API connection failed!\n") + detail, "API Test Failed");
                 }
             } catch (const std::exception& e) {
-                std::string error_msg = "Failed to parse test result: ";
-                error_msg += e.what();
-                SetDlgItemTextA(wnd, IDC_STATUS_TEXT, "[3/3] API test: ERROR");
-                Feedback::warn(error_msg, "API Test Error");
+                SetDlgItemTextA(wnd, IDC_STATUS_TEXT, "API test: ERROR");
+                Feedback::warn(std::string("Failed to parse test result: ") + e.what(), "API Test Error");
             }
         });
     }).detach();
@@ -2058,12 +1881,22 @@ void AIPreferencePageInstance::on_restart_workers() {
     Logger::instance().info("on_restart_workers: ai_core=" + std::to_string((intptr_t)ai_core) +
         ", is_initialized=" + std::string(ai_core->is_initialized() ? "true" : "false"), __FILE__, __FUNCTION__);
 
-    // AICore 是懒加载：只有执行过 scrape/enhance 后才会调用 initialize() 创建 WorkerManager。
-    // 未初始化时 worker_manager_ 为空，restart_all_workers() 会返回 false。
-    // 此时只在状态栏显示提示，不弹窗。
+    // AICore 是懒加载。未初始化时 worker_manager_ 为空，restart_all_workers() 会返回 false。
+    // 用户可能刚配置了 Python 路径，主动尝试 initialize（破除"先跑 scrape 才能 init"的死循环）。
     if (!ai_core->is_initialized()) {
-        Logger::instance().info("on_restart_workers: AICore not initialized yet, showing hint", __FILE__, __FUNCTION__);
-        SetDlgItemTextA(m_wnd, IDC_WORKER_STATUS_TEXT, "Status: Not started (run scrape/enhance first)");
+        Logger::instance().info("on_restart_workers: AICore not initialized, calling ensure_ai_core_ready", __FILE__, __FUNCTION__);
+        SetDlgItemTextA(m_wnd, IDC_WORKER_STATUS_TEXT, "Starting...");
+        ensure_ai_core_ready();
+        if (!ai_core->is_initialized()) {
+            Logger::instance().error("on_restart_workers: ensure_ai_core_ready failed", __FILE__, __FUNCTION__);
+            SetDlgItemTextA(m_wnd, IDC_WORKER_STATUS_TEXT, "Status: Failed (check Python path)");
+            Feedback::warn("Failed to start worker. Please check Python path in settings and retry.",
+                           "AI Metadata");
+            return;
+        }
+        // 初始化成功，刷新 provider 列表
+        SetDlgItemTextA(m_wnd, IDC_WORKER_STATUS_TEXT, "Status: Running");
+        refresh_provider_list();
         return;
     }
 
@@ -2088,7 +1921,7 @@ void AIPreferencePageInstance::on_restart_workers() {
 
 void AIPreferencePageInstance::on_browse_python() {
     char buffer[MAX_PATH] = {0};
-    
+
     OPENFILENAMEA ofn = {0};
     ofn.lStructSize = sizeof(ofn);
     ofn.hwndOwner = m_wnd;
@@ -2097,15 +1930,38 @@ void AIPreferencePageInstance::on_browse_python() {
     ofn.nMaxFile = MAX_PATH;
     ofn.lpstrTitle = "Select Python Executable";
     ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
-    
+
     if (GetOpenFileNameA(&ofn)) {
         SetDlgItemTextA(m_wnd, IDC_PYTHON_PATH, buffer);
         m_settings.python_path = buffer;
         on_changed();
-        
+
         std::string status_text = "Status: " + std::string(buffer);
         SetDlgItemTextA(m_wnd, IDC_PYTHON_STATUS, status_text.c_str());
     }
+}
+
+void AIPreferencePageInstance::on_detect_python() {
+    SetDlgItemTextA(m_wnd, IDC_PYTHON_STATUS, "Detecting...");
+
+    // 强制重新检测（不走 get_python_path 缓存，直接调 auto_detect）
+    std::string detected = SettingsManager::instance().auto_detect_python_path();
+
+    if (detected.empty()) {
+        SetDlgItemTextA(m_wnd, IDC_PYTHON_STATUS, "Status: Python not found");
+        Feedback::warn(
+            "Python was not found on this system.\n\n"
+            "Please install Python 3.8+ or manually specify the python.exe path using Browse.",
+            "AI Metadata");
+        return;
+    }
+
+    SetDlgItemTextA(m_wnd, IDC_PYTHON_PATH, detected.c_str());
+    m_settings.python_path = detected;
+    on_changed();
+
+    std::string status_text = "Status: " + detected;
+    SetDlgItemTextA(m_wnd, IDC_PYTHON_STATUS, status_text.c_str());
 }
 
 void AIPreferencePageInstance::on_changed() {
@@ -2122,158 +1978,6 @@ void AIPreferencePageInstance::on_changed() {
 /**
  * @brief 自定义模型配置对话框的数据结构
  */
-struct CustomModelConfigData {
-    std::string api_format;  // "openai" or "anthropic"
-    std::string base_url;
-    std::string model_id;
-    std::string api_key;
-
-    static INT_PTR WINAPI dialog_proc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam) {
-        if (message == WM_INITDIALOG) {
-            char diag[512];
-            std::snprintf(diag, sizeof(diag),
-                "[CustomModelConfig] WM_INITDIALOG: hDlg=%p lParam=%p",
-                (void*)hDlg, (void*)lParam);
-            Logger::instance().info(diag);
-
-            // 保存数据指针到窗口
-            SetWindowLongPtr(hDlg, GWLP_USERDATA, lParam);
-            auto* data = reinterpret_cast<CustomModelConfigData*>(lParam);
-            if (!data) {
-                Logger::instance().info("[CustomModelConfig] WM_INITDIALOG: data is NULL!");
-                return TRUE;
-            }
-            std::snprintf(diag, sizeof(diag),
-                "[CustomModelConfig] api_format=%s base_url=%s model_id=%s",
-                data->api_format.c_str(), data->base_url.c_str(), data->model_id.c_str());
-            Logger::instance().info(diag);
-
-            // 初始化 API 格式下拉框
-            HWND formatCombo = GetDlgItem(hDlg, IDC_API_FORMAT);
-            std::snprintf(diag, sizeof(diag),
-                "[CustomModelConfig] GetDlgItem(IDC_API_FORMAT) = %p",
-                (void*)formatCombo);
-            Logger::instance().info(diag);
-
-            if (formatCombo) {
-                LRESULT r1 = SendMessageA(formatCombo, CB_RESETCONTENT, 0, 0);
-                LRESULT r2 = SendMessageA(formatCombo, CB_INSERTSTRING, -1, (LPARAM)"OpenAI Chat Completions");
-                LRESULT r3 = SendMessageA(formatCombo, CB_INSERTSTRING, -1, (LPARAM)"Anthropic Messages");
-                LRESULT r4 = SendMessageA(formatCombo, CB_SETCURSEL, (data->api_format == "anthropic") ? 1 : 0, 0);
-                LRESULT count = SendMessageA(formatCombo, CB_GETCOUNT, 0, 0);
-                std::snprintf(diag, sizeof(diag),
-                    "[CustomModelConfig] CB_RESETCONTENT=%ld CB_INSERTSTRING[0]=%ld CB_INSERTSTRING[1]=%ld CB_SETCURSEL=%ld CB_GETCOUNT=%ld",
-                    (long)r1, (long)r2, (long)r3, (long)r4, (long)count);
-                Logger::instance().info(diag);
-            } else {
-                Logger::instance().info("[CustomModelConfig] GetDlgItem(IDC_API_FORMAT) returned NULL!");
-            }
-
-            SetDlgItemTextA(hDlg, IDC_CUSTOM_URL, data->base_url.c_str());
-            SetDlgItemTextA(hDlg, IDC_CUSTOM_MODEL_ID, data->model_id.c_str());
-            SetDlgItemTextA(hDlg, IDC_CUSTOM_API_KEY, data->api_key.c_str());
-            return TRUE;
-        }
-
-        if (message == WM_COMMAND) {
-            if (LOWORD(wParam) == IDOK) {
-                Logger::instance().info("[CustomModelConfig] IDOK pressed");
-                auto* data = reinterpret_cast<CustomModelConfigData*>(
-                    GetWindowLongPtr(hDlg, GWLP_USERDATA));
-                if (data) {
-                    HWND formatCombo = GetDlgItem(hDlg, IDC_API_FORMAT);
-                    if (formatCombo) {
-                        int sel = ComboBox_GetCurSel(formatCombo);
-                        data->api_format = (sel == 1) ? "anthropic" : "openai";
-                    }
-                    char buf[512] = {0};
-                    GetDlgItemTextA(hDlg, IDC_CUSTOM_URL, buf, sizeof(buf));
-                    data->base_url = trim_string(buf);
-                    memset(buf, 0, sizeof(buf));
-                    GetDlgItemTextA(hDlg, IDC_CUSTOM_MODEL_ID, buf, sizeof(buf));
-                    data->model_id = trim_string(buf);
-                    memset(buf, 0, sizeof(buf));
-                    GetDlgItemTextA(hDlg, IDC_CUSTOM_API_KEY, buf, sizeof(buf));
-                    data->api_key = trim_string(buf);
-                }
-                EndDialog(hDlg, IDOK);
-                return TRUE;
-            }
-            if (LOWORD(wParam) == IDCANCEL) {
-                EndDialog(hDlg, IDCANCEL);
-                return TRUE;
-            }
-        }
-        return FALSE;
-    }
-};
-
-void AIPreferencePageInstance::on_custom_model_config() {
-    Logger::instance().info("[CustomModelConfig] on_custom_model_config entered");
-    save_settings();
-
-    auto& config = m_settings.provider_configs[AIProvider::Custom];
-
-    // 准备对话框数据
-    CustomModelConfigData dialog_data;
-    dialog_data.api_format = config.api_format.empty() ? "openai" : config.api_format;
-    dialog_data.base_url = config.base_url;
-    dialog_data.model_id = config.selected_model;
-    dialog_data.api_key = config.api_key;
-
-    {
-        char diag[512];
-        std::snprintf(diag, sizeof(diag),
-            "[CustomModelConfig] calling DialogBoxParam: hInst=%p resId=%d parent=%p",
-            (void*)core_api::get_my_instance(), IDD_CUSTOM_MODEL_CONFIG, (void*)m_wnd);
-        Logger::instance().info(diag);
-    }
-
-    // 显示模态对话框
-    INT_PTR result = DialogBoxParam(
-        core_api::get_my_instance(),
-        MAKEINTRESOURCE(IDD_CUSTOM_MODEL_CONFIG),
-        m_wnd,
-        &CustomModelConfigData::dialog_proc,
-        reinterpret_cast<LPARAM>(&dialog_data)
-    );
-
-    {
-        char diag[512];
-        std::snprintf(diag, sizeof(diag),
-            "[CustomModelConfig] DialogBoxParam returned: result=%ld",
-            (long)result);
-        Logger::instance().info(diag);
-    }
-
-    if (result == IDOK) {
-        config.api_format = dialog_data.api_format;
-        config.base_url = dialog_data.base_url;
-        config.selected_model = dialog_data.model_id;
-        config.api_key = dialog_data.api_key;
-
-        // 更新模型列表
-        bool found = false;
-        for (const auto& m : config.models) {
-            if (m.name == dialog_data.model_id) {
-                found = true;
-                break;
-            }
-        }
-        if (!found && !dialog_data.model_id.empty()) {
-            ModelInfo mi;
-            mi.name = dialog_data.model_id;
-            mi.priority = 1;
-            config.models.push_back(mi);
-        }
-
-        update_api_key_for_provider();
-        update_model_combo();
-        std::string status = "Custom: " + dialog_data.api_format + " | " + dialog_data.base_url + " | " + dialog_data.model_id;
-        SetDlgItemTextA(m_wnd, IDC_STATUS_TEXT, status.c_str());
-        on_changed();
-    }
-}
 
 void AIPreferencePageInstance::on_export_templates() {
     // 目标目录：<profile>/foo_metadata_enhancer/prompts/
@@ -2358,6 +2062,435 @@ void AIPreferencePageInstance::on_export_templates() {
     } else {
         MessageBoxA(m_wnd, "Failed to export templates. Check logs.", "Export Failed", MB_OK | MB_ICONERROR);
     }
+}
+
+
+// ========================= Providers V1 UI =========================
+
+void AIPreferencePageInstance::ensure_ai_core_ready() {
+    AICore* ai_core = get_ai_core_instance();
+    if (!ai_core) return;
+    if (ai_core->is_initialized()) return;
+
+    std::string profile_path = core_api::get_profile_path();
+    if (profile_path.find("file://") == 0) {
+        profile_path = profile_path.substr(7);
+    }
+    std::string sub_dir = profile_path + "\\foo_metadata_enhancer";
+    CreateDirectoryA(sub_dir.c_str(), NULL);
+    ai_core->set_cache_path(sub_dir + "\\" + constants::cache_db_name());
+    if (!ai_core->initialize()) {
+        Logger::instance().error("ensure_ai_core_ready: initialize failed", __FILE__, __FUNCTION__);
+    }
+}
+
+std::string AIPreferencePageInstance::selected_provider_id() const {
+    HWND list = GetDlgItem(m_wnd, IDC_PROVIDER_LIST);
+    if (!list) return {};
+    int sel = ListView_GetNextItem(list, -1, LVNI_SELECTED);
+    if (sel < 0 || sel >= (int)m_provider_ids.size()) return {};
+    return m_provider_ids[sel];
+}
+
+void AIPreferencePageInstance::refresh_provider_list() {
+    HWND list = GetDlgItem(m_wnd, IDC_PROVIDER_LIST);
+    if (!list) {
+        LOG_ERROR("refresh_provider_list: IDC_PROVIDER_LIST not found");
+        return;
+    }
+    LOG_INFO("refresh_provider_list: start, m_wnd=" + std::to_string(reinterpret_cast<uintptr_t>(m_wnd)));
+
+    if (ListView_GetColumnWidth(list, 0) <= 0) {
+        ListView_SetExtendedListViewStyle(list, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES);
+        // UNICODE 构建下 SysListView32 内部为 W 版本，直接使用 LVCOLUMNW + LVM_INSERTCOLUMNW
+        // 避免 A 版本消息在某些 Windows 版本上转换失败导致列不可见。
+        LVCOLUMNW col{};
+        col.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
+        col.pszText = const_cast<wchar_t*>(L"Name");
+        col.cx = 90;
+        col.iSubItem = 0;
+        SendMessageW(list, LVM_INSERTCOLUMNW, 0, reinterpret_cast<LPARAM>(&col));
+        col.pszText = const_cast<wchar_t*>(L"Protocol");
+        col.cx = 70;
+        col.iSubItem = 1;
+        SendMessageW(list, LVM_INSERTCOLUMNW, 1, reinterpret_cast<LPARAM>(&col));
+        col.pszText = const_cast<wchar_t*>(L"Model");
+        col.cx = 70;
+        col.iSubItem = 2;
+        SendMessageW(list, LVM_INSERTCOLUMNW, 2, reinterpret_cast<LPARAM>(&col));
+        Logger::instance().info("refresh_provider_list: columns inserted");
+    }
+
+    // 不在此处调用 ensure_ai_core_ready()。
+    // 原因：refresh_provider_list 在 on_init_dialog 时被调用，若强制 initialize() 会同步阻塞
+    // fb2k 主线程去 CreateProcess，worker 启动失败时还会反复重试，导致 fb2k 卡死。
+    // 改为只检查 is_initialized()，未初始化时显示提示，由用户主动点击 'Restart Workers' 启动。
+    AICore* ai_core = get_ai_core_instance();
+    ListView_DeleteAllItems(list);
+    m_provider_ids.clear();
+
+    if (!ai_core || !ai_core->is_initialized()) {
+        SetDlgItemTextA(m_wnd, IDC_PROVIDER_CURRENT_TEXT, "(worker not ready)");
+        SetDlgItemTextA(m_wnd, IDC_STATUS_TEXT, "Worker not ready. Click 'Restart Workers' to start.");
+        LOG_WARN("refresh_provider_list: ai_core not ready");
+        return;
+    }
+
+    std::string resp = ai_core->providers_list(false, 15000);
+    LOG_INFO("refresh_provider_list: resp preview (first 200 bytes): " +
+             (resp.size() > 200 ? resp.substr(0, 200) : resp));
+    try {
+        auto j = nlohmann::json::parse(resp);
+        const bool ok = j.value("success", false) || j.value("status", "") == "success";
+        if (!ok) {
+            std::string err = j.value("error", "list failed");
+            SetDlgItemTextA(m_wnd, IDC_STATUS_TEXT, ("Providers list failed: " + err).c_str());
+            LOG_ERROR("refresh_provider_list: list failed, err=" + err);
+            return;
+        }
+        auto data = j.value("data", nlohmann::json::object());
+        m_current_provider_id = data.value("current_provider_id", "");
+        auto providers = data.value("providers", nlohmann::json::array());
+        int row = 0;
+        std::string current_label = "(none)";
+        for (auto& p : providers) {
+            std::string id = p.value("id", "");
+            std::string name = p.value("name", "");
+            std::string protocol = p.value("protocol", "");
+            std::string model = p.value("model", "");
+            m_provider_ids.push_back(id);
+            LOG_INFO(std::string("refresh_provider_list: row=") + std::to_string(row) +
+                     " name=" + name + " protocol=" + protocol + " model=" + model);
+
+            // UNICODE 构建下直接使用 W 版本 API + wchar_t 字符串，
+            // 避免 A 版本消息转换失败导致行/subitem 不可见。
+            std::wstring wname = utf8_to_wstring(name);
+            std::wstring wprotocol = utf8_to_wstring(protocol);
+            std::wstring wmodel = utf8_to_wstring(model);
+
+            LVITEMW item{};
+            item.mask = LVIF_TEXT;
+            item.iItem = row;
+            item.iSubItem = 0;
+            item.pszText = const_cast<wchar_t*>(wname.c_str());
+            int inserted = static_cast<int>(SendMessageW(list, LVM_INSERTITEMW, 0, reinterpret_cast<LPARAM>(&item)));
+            if (inserted < 0) {
+                LOG_ERROR("refresh_provider_list: LVM_INSERTITEMW failed for row=" + std::to_string(row));
+                continue;
+            }
+            row = inserted;
+
+            LVITEMW sub{};
+            sub.mask = LVIF_TEXT;
+            sub.iItem = row;
+            sub.iSubItem = 1;
+            sub.pszText = const_cast<wchar_t*>(wprotocol.c_str());
+            SendMessageW(list, LVM_SETITEMTEXTW, static_cast<WPARAM>(row), reinterpret_cast<LPARAM>(&sub));
+            sub.iSubItem = 2;
+            sub.pszText = const_cast<wchar_t*>(wmodel.c_str());
+            SendMessageW(list, LVM_SETITEMTEXTW, static_cast<WPARAM>(row), reinterpret_cast<LPARAM>(&sub));
+
+            if (!m_current_provider_id.empty() && id == m_current_provider_id) {
+                current_label = name + " / " + model;
+                ListView_SetItemState(list, row, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+            }
+            row++;
+        }
+        SetDlgItemTextA(m_wnd, IDC_PROVIDER_CURRENT_TEXT, current_label.c_str());
+        char status[128];
+        std::snprintf(status, sizeof(status), "Providers: %d", row);
+        SetDlgItemTextA(m_wnd, IDC_STATUS_TEXT, status);
+        int actual_count = ListView_GetItemCount(list);
+        BOOL visible = IsWindowVisible(list);
+        RECT rc{};
+        GetWindowRect(list, &rc);
+        HWND parent_wnd = GetParent(list);
+        BOOL parent_visible = parent_wnd ? IsWindowVisible(parent_wnd) : FALSE;
+        BOOL wnd_visible = m_wnd ? IsWindowVisible(m_wnd) : FALSE;
+        LOG_INFO(std::string("refresh_provider_list: done, rows=") + std::to_string(row) +
+                 " actual_item_count=" + std::to_string(actual_count) +
+                 " list_visible=" + (visible ? "1" : "0") +
+                 " parent_visible=" + (parent_visible ? "1" : "0") +
+                 " mwnd_visible=" + (wnd_visible ? "1" : "0") +
+                 " rect=(" + std::to_string(rc.left) + "," + std::to_string(rc.top) +
+                 "," + std::to_string(rc.right) + "," + std::to_string(rc.bottom) + ")");
+        // 防御性：如果 ListView 不可见但父窗口可见，显式显示 ListView
+        if (!visible && parent_visible) {
+            ShowWindow(list, SW_SHOW);
+            LOG_INFO("refresh_provider_list: explicitly showed ListView (was invisible but parent visible)");
+        }
+    } catch (const std::exception& e) {
+        SetDlgItemTextA(m_wnd, IDC_STATUS_TEXT, (std::string("Providers list parse error: ") + e.what()).c_str());
+        LOG_ERROR(std::string("refresh_provider_list parse error: ") + e.what());
+    }
+}
+
+struct ProviderEditDlgData {
+    std::string* name;
+    std::string* protocol;
+    std::string* base_url;
+    std::string* api_key;
+    std::string* model;
+    bool is_new;
+};
+
+static INT_PTR CALLBACK ProviderEditDlgProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
+    ProviderEditDlgData* data = reinterpret_cast<ProviderEditDlgData*>(GetWindowLongPtr(wnd, GWLP_USERDATA));
+    switch (msg) {
+    case WM_INITDIALOG: {
+        data = reinterpret_cast<ProviderEditDlgData*>(lp);
+        if (!data) {
+            EndDialog(wnd, IDCANCEL);
+            return TRUE;
+        }
+        SetWindowLongPtr(wnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(data));
+        // UNICODE 构建下使用宽字符标题，避免 A/W 混用崩溃
+        SetWindowTextW(wnd, data->is_new ? L"Add Provider" : L"Edit Provider");
+
+        HWND combo = GetDlgItem(wnd, IDC_PROV_EDIT_PROTOCOL);
+        if (combo) {
+            // 注意：CB_ADDSTRING 在某些环境下被 hook 拦截（返回 0 但实际未添加），
+            // 改用 CB_INSERTSTRING（wParam=索引，lParam=字符串），经测试可正常工作。
+            SendMessageW(combo, CB_RESETCONTENT, 0, 0);
+            SendMessageW(combo, CB_INSERTSTRING, 0, reinterpret_cast<LPARAM>(L"openai_chat"));
+            SendMessageW(combo, CB_INSERTSTRING, 1, reinterpret_cast<LPARAM>(L"anthropic_messages"));
+            int sel = 0;
+            if (data->protocol && *data->protocol == "anthropic_messages") sel = 1;
+            SendMessageW(combo, CB_SETCURSEL, sel, 0);
+            int count = static_cast<int>(SendMessageW(combo, CB_GETCOUNT, 0, 0));
+            LOG_INFO(std::string("ProviderEditDlg: protocol combo filled, count=") + std::to_string(count));
+        } else {
+            LOG_ERROR("ProviderEditDlg WM_INITDIALOG: IDC_PROV_EDIT_PROTOCOL not found");
+        }
+        if (data->name) SetDlgItemTextA(wnd, IDC_PROV_EDIT_NAME, data->name->c_str());
+        if (data->base_url) SetDlgItemTextA(wnd, IDC_PROV_EDIT_URL, data->base_url->c_str());
+        if (data->api_key) SetDlgItemTextA(wnd, IDC_PROV_EDIT_KEY, data->api_key->c_str());
+        if (data->model) SetDlgItemTextA(wnd, IDC_PROV_EDIT_MODEL, data->model->c_str());
+        return TRUE;
+    }
+    case WM_COMMAND:
+        if (LOWORD(wp) == IDOK) {
+            if (!data) {
+                EndDialog(wnd, IDCANCEL);
+                return TRUE;
+            }
+            char buf[1024];
+            GetDlgItemTextA(wnd, IDC_PROV_EDIT_NAME, buf, sizeof(buf));
+            if (data->name) *data->name = buf;
+            GetDlgItemTextA(wnd, IDC_PROV_EDIT_URL, buf, sizeof(buf));
+            if (data->base_url) *data->base_url = buf;
+            GetDlgItemTextA(wnd, IDC_PROV_EDIT_KEY, buf, sizeof(buf));
+            if (data->api_key) *data->api_key = buf;
+            GetDlgItemTextA(wnd, IDC_PROV_EDIT_MODEL, buf, sizeof(buf));
+            if (data->model) *data->model = buf;
+            HWND combo = GetDlgItem(wnd, IDC_PROV_EDIT_PROTOCOL);
+            int sel = combo ? static_cast<int>(SendMessageW(combo, CB_GETCURSEL, 0, 0)) : 0;
+            if (data->protocol) {
+                *data->protocol = (sel == 1) ? "anthropic_messages" : "openai_chat";
+            }
+            if (data->name && data->name->empty()) {
+                MessageBoxW(wnd, L"Name is required.", L"Provider", MB_OK | MB_ICONWARNING);
+                return TRUE;
+            }
+            EndDialog(wnd, IDOK);
+            return TRUE;
+        }
+        if (LOWORD(wp) == IDCANCEL) {
+            EndDialog(wnd, IDCANCEL);
+            return TRUE;
+        }
+        break;
+    }
+    return FALSE;
+}
+
+bool AIPreferencePageInstance::show_provider_edit_dialog(
+    std::string& name,
+    std::string& protocol,
+    std::string& base_url,
+    std::string& api_key,
+    std::string& model,
+    bool is_new
+) {
+    ProviderEditDlgData data{&name, &protocol, &base_url, &api_key, &model, is_new};
+    HINSTANCE inst = core_api::get_my_instance();
+    // 与项目其它对话框一致：UNICODE 下走 DialogBoxParamW
+    // 父窗口优先主窗口，避免 Preferences 子页句柄导致模态对话框异常
+    HWND parent = core_api::get_main_window();
+    if (!parent || !IsWindow(parent)) parent = m_wnd;
+
+    SetLastError(ERROR_SUCCESS);
+    INT_PTR ret = DialogBoxParam(
+        inst,
+        MAKEINTRESOURCE(IDD_PROVIDER_EDIT),
+        parent,
+        ProviderEditDlgProc,
+        reinterpret_cast<LPARAM>(&data)
+    );
+    if (ret == -1) {
+        DWORD err = GetLastError();
+        LOG_ERROR(std::string("show_provider_edit_dialog: DialogBoxParam failed, GetLastError=") +
+                  std::to_string(err));
+        Feedback::warn(
+            std::string("Failed to open provider editor (error ") + std::to_string(err) + ").",
+            "Provider"
+        );
+        return false;
+    }
+    return ret == IDOK;
+}
+
+void AIPreferencePageInstance::on_provider_add() {
+    ensure_ai_core_ready();
+    AICore* ai_core = get_ai_core_instance();
+    if (!ai_core || !ai_core->is_initialized()) {
+        Feedback::warn(
+            "Worker is not running. Provider configuration is stored on the worker side, "
+            "so the worker must be started first.\n\n"
+            "Please click 'Restart Workers' button to start the worker, "
+            "then retry adding a provider.",
+            "AI Metadata");
+        return;
+    }
+    std::string name = "New Provider";
+    std::string protocol = "openai_chat";
+    std::string base_url;
+    std::string api_key;
+    std::string model;
+    if (!show_provider_edit_dialog(name, protocol, base_url, api_key, model, true)) return;
+
+    try {
+        nlohmann::json body;
+        body["name"] = name;
+        body["protocol"] = protocol.empty() ? "openai_chat" : protocol;
+        body["base_url"] = base_url;
+        body["api_key"] = api_key;
+        body["model"] = model;
+        body["enabled"] = true;
+        body["is_preset"] = false;
+
+        LOG_INFO(std::string("on_provider_add: creating name=") + name +
+                 " protocol=" + protocol + " model=" + model);
+        auto resp = nlohmann::json::parse(ai_core->providers_create(body.dump(), 15000), nullptr, false);
+        const bool ok = resp.is_object() &&
+            (resp.value("success", false) || resp.value("status", "") == "success");
+        if (!ok) {
+            std::string err = resp.is_object() ? resp.value("error", "create failed") : "create failed";
+            Feedback::warn(err, "Add Provider");
+            return;
+        }
+        refresh_provider_list();
+        SetDlgItemTextA(m_wnd, IDC_STATUS_TEXT, "Provider created");
+    } catch (const std::exception& e) {
+        LOG_ERROR(std::string("on_provider_add exception: ") + e.what());
+        Feedback::warn(std::string("Add provider failed: ") + e.what(), "Add Provider");
+    }
+}
+
+void AIPreferencePageInstance::on_provider_edit() {
+    ensure_ai_core_ready();
+    AICore* ai_core = get_ai_core_instance();
+    if (!ai_core || !ai_core->is_initialized()) {
+        Feedback::warn("Worker not ready.", "AI Metadata");
+        return;
+    }
+    std::string pid = selected_provider_id();
+    if (pid.empty()) {
+        Feedback::warn("Select a provider first.", "AI Metadata");
+        return;
+    }
+    auto get_resp = nlohmann::json::parse(ai_core->providers_get(pid, true, 15000), nullptr, false);
+    if (!get_resp.is_object() ||
+        (!get_resp.value("success", false) && get_resp.value("status", "") != "success")) {
+        Feedback::warn("Failed to load provider.", "Edit Provider");
+        return;
+    }
+    auto prov = get_resp.value("data", nlohmann::json::object()).value("provider", nlohmann::json::object());
+    std::string name = prov.value("name", "");
+    std::string protocol = prov.value("protocol", "openai_chat");
+    std::string base_url = prov.value("base_url", "");
+    std::string api_key = prov.value("api_key", "");
+    std::string model = prov.value("model", "");
+    if (!show_provider_edit_dialog(name, protocol, base_url, api_key, model, false)) return;
+
+    nlohmann::json body;
+    body["id"] = pid;
+    body["name"] = name;
+    body["protocol"] = protocol;
+    body["base_url"] = base_url;
+    body["api_key"] = api_key;
+    body["model"] = model;
+    auto resp = nlohmann::json::parse(ai_core->providers_update(body.dump(), 15000), nullptr, false);
+    const bool ok = resp.is_object() &&
+        (resp.value("success", false) || resp.value("status", "") == "success");
+    if (!ok) {
+        std::string err = resp.is_object() ? resp.value("error", "update failed") : "update failed";
+        Feedback::warn(err, "Edit Provider");
+        return;
+    }
+    refresh_provider_list();
+    SetDlgItemTextA(m_wnd, IDC_STATUS_TEXT, "Provider updated");
+}
+
+void AIPreferencePageInstance::on_provider_delete() {
+    ensure_ai_core_ready();
+    AICore* ai_core = get_ai_core_instance();
+    if (!ai_core || !ai_core->is_initialized()) return;
+    std::string pid = selected_provider_id();
+    if (pid.empty()) {
+        Feedback::warn("Select a provider first.", "AI Metadata");
+        return;
+    }
+    if (MessageBoxA(m_wnd, "Delete selected provider?", "Delete Provider", MB_YESNO | MB_ICONQUESTION) != IDYES) {
+        return;
+    }
+    auto resp = nlohmann::json::parse(ai_core->providers_delete(pid, 15000), nullptr, false);
+    if (!resp.is_object() || !resp.value("success", false)) {
+        std::string err = resp.is_object() ? resp.value("error", "delete failed") : "delete failed";
+        Feedback::warn(err, "Delete Provider");
+        return;
+    }
+    refresh_provider_list();
+    SetDlgItemTextA(m_wnd, IDC_STATUS_TEXT, "Provider deleted");
+}
+
+void AIPreferencePageInstance::on_provider_set_current() {
+    ensure_ai_core_ready();
+    AICore* ai_core = get_ai_core_instance();
+    if (!ai_core || !ai_core->is_initialized()) return;
+    std::string pid = selected_provider_id();
+    if (pid.empty()) {
+        Feedback::warn("Select a provider first.", "AI Metadata");
+        return;
+    }
+    auto resp = nlohmann::json::parse(ai_core->providers_set_current(pid, 15000), nullptr, false);
+    if (!resp.is_object() || !resp.value("success", false)) {
+        std::string err = resp.is_object() ? resp.value("error", "set_current failed") : "set_current failed";
+        Feedback::warn(err, "Set Current");
+        return;
+    }
+    refresh_provider_list();
+    SetDlgItemTextA(m_wnd, IDC_STATUS_TEXT, "Current provider updated");
+}
+
+void AIPreferencePageInstance::on_provider_restore_presets() {
+    ensure_ai_core_ready();
+    AICore* ai_core = get_ai_core_instance();
+    if (!ai_core || !ai_core->is_initialized()) return;
+    if (MessageBoxA(m_wnd,
+                    "Restore seed presets (Zhipu/DeepSeek/OpenRouter)?\nExisting names are kept unless overwritten.",
+                    "Restore Presets",
+                    MB_YESNO | MB_ICONQUESTION) != IDYES) {
+        return;
+    }
+    auto resp = nlohmann::json::parse(ai_core->providers_restore_presets(false, 15000), nullptr, false);
+    if (!resp.is_object() || !resp.value("success", false)) {
+        std::string err = resp.is_object() ? resp.value("error", "restore failed") : "restore failed";
+        Feedback::warn(err, "Restore Presets");
+        return;
+    }
+    refresh_provider_list();
+    SetDlgItemTextA(m_wnd, IDC_STATUS_TEXT, "Presets restored");
 }
 
 static preferences_page_factory_t<AIPreferencePageRoot> g_preferences_page_root_factory;

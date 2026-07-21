@@ -33,9 +33,14 @@ class DataSourceManager:
         DataSourceType.DISCOGS,
         DataSourceType.AI,
     ]
-    
+
     DEFAULT_MAX_CONCURRENT = 3
     DEFAULT_CANDIDATE_THRESHOLD = 3
+
+    # 高质量匹配阈值：候选 confidence >= 此值视为已找到可信匹配，跳过 AI 兜底。
+    # 对应 MatchDecision.DecisionConfig.score_threshold (默认 85) / 100。
+    # MB adapter 在内部用 is_best_match 判定后早停，本阈值做等价判定。
+    HIGH_QUALITY_CONFIDENCE = 0.85
     
     # 权威数据源（第一阶段查询）
     AUTHORITATIVE_SOURCES = {
@@ -184,22 +189,31 @@ class DataSourceManager:
                     logger.error(f"{source_type.value} search failed: {e}")
         
         logger.debug(f"Phase 1: Collected {len(candidates)} candidates from authoritative sources")
-        
+
         if len(candidates) < self._candidate_threshold:
-            ai_adapter = self._adapters.get(DataSourceType.AI)
-            ai_config = self._config.get("data_sources", {}).get("ai", {})
-            
-            ai_enabled = is_source_enabled(DataSourceType.AI, "enable_ai")
-            
-            if ai_adapter and ai_enabled and ai_config.get("fallback_only", True):
-                logger.debug(f"Candidates ({len(candidates)}) < threshold ({self._candidate_threshold}), calling AI Adapter as fallback")
-                try:
-                    ai_candidates = ai_adapter.search_candidates(query)
-                    if ai_candidates:
-                        candidates.extend(ai_candidates)
-                        logger.debug(f"AI Adapter returned {len(ai_candidates)} candidates")
-                except Exception as e:
-                    logger.error(f"AI Adapter search failed: {e}")
+            # 已有候选中存在高质量匹配时（如 MB 已通过 MatchDecision 早停），跳过 AI 兜底。
+            # 此分支避免日志中观测到的浪费：MB 已找到 good match 仍触发 AI。
+            if self._has_high_quality_match(candidates):
+                logger.info(
+                    f"Candidates ({len(candidates)}) < threshold ({self._candidate_threshold}) "
+                    f"but high-quality match found (confidence>={self.HIGH_QUALITY_CONFIDENCE}), "
+                    f"skipping AI fallback"
+                )
+            else:
+                ai_adapter = self._adapters.get(DataSourceType.AI)
+                ai_config = self._config.get("data_sources", {}).get("ai", {})
+
+                ai_enabled = is_source_enabled(DataSourceType.AI, "enable_ai")
+
+                if ai_adapter and ai_enabled and ai_config.get("fallback_only", True):
+                    logger.debug(f"Candidates ({len(candidates)}) < threshold ({self._candidate_threshold}), calling AI Adapter as fallback")
+                    try:
+                        ai_candidates = ai_adapter.search_candidates(query)
+                        if ai_candidates:
+                            candidates.extend(ai_candidates)
+                            logger.debug(f"AI Adapter returned {len(ai_candidates)} candidates")
+                    except Exception as e:
+                        logger.error(f"AI Adapter search failed: {e}")
         
         logger.debug(f"Total candidates collected: {len(candidates)}")
         return candidates
@@ -274,7 +288,7 @@ class DataSourceManager:
     
     def set_source_enabled(self, source_type: DataSourceType, enabled: bool) -> None:
         """设置数据源是否启用
-        
+
         Args:
             source_type: 数据源类型
             enabled: 是否启用
@@ -285,3 +299,22 @@ class DataSourceManager:
                 source_key = f"enable_{source_type.value}"
                 adapter._config[source_key] = enabled
                 logger.info(f"Set {source_type.value} enabled: {enabled}")
+
+    def _has_high_quality_match(self, candidates: List[Candidate]) -> bool:
+        """判断候选列表中是否已有高质量匹配
+
+        MB adapter 内部用 MatchDecision.is_best_match 判定后早停（参见
+        musicbrainz_adapter._search_with_paging），但该结论未透出。本方法基于
+        candidate.confidence 做等价判定（confidence = final_score / 100）。
+
+        阈值 HIGH_QUALITY_CONFIDENCE 对应 MatchDecision 的 A 级 final_score 阈值。
+
+        Args:
+            candidates: 候选列表
+
+        Returns:
+            bool: 任一候选 confidence >= HIGH_QUALITY_CONFIDENCE 时返回 True
+        """
+        if not candidates:
+            return False
+        return any(c.confidence >= self.HIGH_QUALITY_CONFIDENCE for c in candidates)

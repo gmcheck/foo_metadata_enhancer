@@ -101,6 +101,41 @@ def get_normalize_store():
         logger.error(f"get_normalize_store: failed to init NormalizeStore: {e}", exc_info=True)
         return None
 
+
+# 全局 ProviderRuntime（ProviderStore + 当前 Protocol Client）
+_provider_runtime = None
+
+
+def get_provider_runtime():
+    """延迟初始化 ProviderRuntime（含 migrate/seed）。"""
+    global _provider_runtime
+    if _provider_runtime is not None:
+        return _provider_runtime
+
+    try:
+        from ai.provider_runtime import init_provider_runtime
+
+        worker_cfg = {}
+        yaml_providers = None
+        try:
+            worker_cfg = config.config.get("worker", {}) or {}
+            yaml_providers = config.config.get("providers")
+        except Exception:
+            pass
+
+        _provider_runtime = init_provider_runtime(
+            timeout_ms=int(worker_cfg.get("api_timeout_ms", 180000)),
+            max_retries=int(worker_cfg.get("max_retries", 3)),
+            yaml_providers=yaml_providers if isinstance(yaml_providers, dict) else None,
+            bootstrap=True,
+        )
+        logger.info("get_provider_runtime: initialized")
+        return _provider_runtime
+    except Exception as e:
+        logger.error(f"get_provider_runtime: failed: {e}", exc_info=True)
+        return None
+
+
 try:
     from common.models import (
         IPCResponse,
@@ -353,140 +388,34 @@ def process_set_log_level(request: Dict) -> Dict:
 
 
 def process_test_api(request: Dict) -> Dict:
-    """处理API测试请求
+    """Legacy test_api entry (deprecated).
 
-    发送简单测试消息验证API连接。
-
-    Args:
-        request: 请求字典，包含provider和model参数
-
-    Returns:
-        Dict: 测试结果响应
+    V1 请使用 method=providers / action=test。
+    此处保留路由以免旧 C++ 调用直接崩溃，并返回明确迁移提示。
     """
-    from ai.providers import AIProviderFactory
-
     request_id = request.get("id", str(uuid.uuid4()))
-    params = request.get("params", {})
-    provider = params.get("provider", "zhipu")
-    model = params.get("model", "")
-    request_provider_cfg = params.get("provider_cfg") or {}
-
-    logger.info(f"process_test_api: Testing API for provider={provider}, model={model}")
-
-    try:
-        # 必须用 UI 传入的 provider/model 创建实例，而不是 config 里的 default。
-        # 否则用户在 UI 切换 provider 后 test_api 仍然测的是旧 provider。
-        providers_cfg = config.config.get("providers", {})
-        provider_cfg = providers_cfg.get(provider, {})
-        if not provider_cfg and not request_provider_cfg:
-            return create_response(
-                request_id,
-                success=False,
-                results=[{
-                    "provider": provider,
-                    "model": model,
-                    "status": "failed",
-                    "message": f"Provider '{provider}' not found in config."
-                }]
-            )
-
-        # 复制一份避免污染原配置；请求中的 provider_cfg 覆盖本地配置（支持 custom 热测试）
-        provider_cfg = dict(provider_cfg or {})
-        if isinstance(request_provider_cfg, dict) and request_provider_cfg:
-            for key, value in request_provider_cfg.items():
-                if key == "extra_params" and isinstance(value, dict):
-                    merged_extra = dict(provider_cfg.get("extra_params") or {})
-                    merged_extra.update(value)
-                    provider_cfg["extra_params"] = merged_extra
-                elif value is not None and value != "":
-                    provider_cfg[key] = value
-
-        # 兼容：api_format 既可在顶层，也可在 extra_params 中
-        api_format = provider_cfg.get("api_format") or (provider_cfg.get("extra_params") or {}).get("api_format")
-        if api_format:
-            provider_cfg["api_format"] = api_format
-            extra_params = dict(provider_cfg.get("extra_params") or {})
-            extra_params["api_format"] = api_format
-            provider_cfg["extra_params"] = extra_params
-
-        provider_cfg["timeout_ms"] = config.config.get("worker", {}).get("api_timeout_ms", 60000)
-        provider_cfg["max_retries"] = 1  # 测试只跑一次
-        if model:
-            provider_cfg["selected_model"] = model
-
-        logger.info(
-            f"process_test_api: provider_cfg keys={list(provider_cfg.keys())}, "
-            f"base_url={provider_cfg.get('base_url', '')!r}, "
-            f"api_format={provider_cfg.get('api_format', '')!r}, "
-            f"selected_model={provider_cfg.get('selected_model', '')!r}"
-        )
-
-        provider_instance = AIProviderFactory.create_from_config(provider_cfg, provider)
-        logger.info(f"process_test_api: Created provider instance: {provider_instance}")
-
-        if not provider_instance:
-            return create_response(
-                request_id,
-                success=False,
-                results=[{
-                    "provider": provider,
-                    "model": model,
-                    "status": "failed",
-                    "message": "Failed to create provider instance."
-                }]
-            )
-
-        test_messages = [
-            {"role": "system", "content": "You are a music metadata expert. Respond with a JSON object containing a 'genre' field."},
-            {"role": "user", "content": "What is the genre of 'Test Song' by 'Test Artist'?"}
-        ]
-
-        response = provider_instance.chat_completion_json(test_messages, temperature=0.3)
-        
-        if response.success:
-            try:
-                result = json.loads(response.content) if response.content else {}
-                genre = result.get("genre", "unknown")
-            except:
-                genre = "unknown"
-            
-            return create_response(
-                request_id, 
-                success=True, 
-                results=[{
-                    "provider": provider,
-                    "model": response.model,
-                    "status": "connected",
-                    "test_genre": genre,
-                    "tokens_used": response.tokens_used,
-                    "message": f"API connection successful. Test genre: {genre}"
-                }]
-            )
-        else:
-            error_msg = response.error or "Unknown error"
-            return create_response(
-                request_id,
-                success=False,
-                results=[{
-                    "provider": provider,
-                    "model": response.model or model,
-                    "status": "failed",
-                    "message": error_msg
-                }]
-            )
-    
-    except Exception as e:
-        logger.error(f"Error testing API: {e}", exc_info=True)
-        return create_response(
-            request_id,
-            success=False,
-            results=[{
-                "provider": provider,
-                "model": model,
-                "status": "error",
-                "message": str(e)
-            }]
-        )
+    params = request.get("params", {}) or {}
+    logger.warning(
+        "process_test_api is deprecated; use method=providers action=test. params_keys=%s",
+        list(params.keys()),
+    )
+    return create_response(
+        request_id,
+        success=False,
+        results=[{
+            "status": "deprecated",
+            "message": (
+                "test_api is deprecated. Use Preferences Provider list "
+                "Test Connection (providers.test) instead."
+            ),
+            "provider": params.get("provider", ""),
+            "model": params.get("model", ""),
+        }],
+        error={
+            "code": "DEPRECATED",
+            "message": "test_api deprecated; use providers.test",
+        },
+    )
 
 
 def process_scrape(request: Dict) -> Dict:
@@ -846,6 +775,17 @@ def process_save_normalize_aliases(request: Dict) -> Dict:
         )
 
 
+
+def process_providers(request: Dict) -> Dict:
+    """处理 providers 管理 IPC（V1）。"""
+    from ai.providers_ipc import process_providers as _process_providers
+    return _process_providers(
+        request,
+        create_response=create_response,
+        get_provider_runtime=get_provider_runtime,
+    )
+
+
 def handle_request(request: Dict) -> Optional[Dict]:
     """处理单个请求
     
@@ -882,6 +822,8 @@ def handle_request(request: Dict) -> Optional[Dict]:
         return process_save_normalize_aliases(request)
     elif method == "set_log_level":
         return process_set_log_level(request)
+    elif method == "providers":
+        return process_providers(request)
     else:
         return create_error_response(request_id, "INVALID_JSON", f"Unknown method: {method}", task_id=task_id)
 

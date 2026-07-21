@@ -198,9 +198,9 @@ class NormalizeProcessor:
                     "error": {"code": "NO_PROVIDER", "message": "No AI provider configured"},
                 }
 
-            web_search_enabled = getattr(adapter.provider, "supports_web_search", False)
+            # V1: 不做 web_search；统一 chat_completion_json
             system_prompt, user_prompt = build_normalize_prompt(
-                field, cleaned, web_search_enabled=web_search_enabled
+                field, cleaned, web_search_enabled=False
             )
 
             messages = [
@@ -210,24 +210,12 @@ class NormalizeProcessor:
 
             logger.debug(f"NormalizeProcessor: calling AI, messages size={len(system_prompt) + len(user_prompt)}")
 
-            # 优先使用带联网搜索的调用（OpenAI Responses API + web_search_preview）
-            # 这样 AI 可联网验证作品归属，显著降低跨语言/小众艺人的误判
-            if web_search_enabled:
-                logger.info(
-                    f"NormalizeProcessor::process: calling AI with web_search, "
-                    f"field={field}, candidates={len(cleaned)}, "
-                    f"system_prompt_len={len(system_prompt)}, user_prompt_len={len(user_prompt)}"
-                )
-                response = adapter.provider.chat_completion_json_with_web_search(
-                    messages, temperature=0.0
-                )
-            else:
-                logger.info(
-                    f"NormalizeProcessor::process: calling AI (no web_search), "
-                    f"field={field}, candidates={len(cleaned)}, "
-                    f"system_prompt_len={len(system_prompt)}, user_prompt_len={len(user_prompt)}"
-                )
-                response = adapter.provider.chat_completion_json(messages, temperature=0.0)
+            logger.info(
+                f"NormalizeProcessor::process: calling AI, "
+                f"field={field}, candidates={len(cleaned)}, "
+                f"system_prompt_len={len(system_prompt)}, user_prompt_len={len(user_prompt)}"
+            )
+            response = adapter.chat_completion_json(messages, temperature=0.0)
 
             if not response.success:
                 logger.error(

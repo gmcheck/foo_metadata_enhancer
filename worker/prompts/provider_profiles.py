@@ -3,51 +3,71 @@
 """
 Provider Profiles
 
-不同 AI Provider 的 Prompt 层差异。
-与 retry / JSON 修复 / 温度参数等代码逻辑紧耦合，因此放在代码内而非外部文件。
-
-每个 Profile 包含：
-- extra_instructions: 注入到 system prompt 的 Provider 特定提示
-- default_temperature: 默认温度（可被 config 中的 extra_params.temperature 覆盖）
+V1：不再按厂商名分支。保留统一默认 profile，以及按 protocol 的轻量差异（可选）。
+旧厂商 key 映射仅用于兼容历史调用，语义收敛到 default。
 """
 
-PROVIDER_PROFILES = {
-    "zhipu": {
+from __future__ import annotations
+
+from typing import Any, Dict
+
+# 统一默认（所有 Provider 实例共用）
+DEFAULT_PROVIDER_PROFILE: Dict[str, Any] = {
+    "extra_instructions": "Ensure JSON is valid. Avoid markdown wrapping.",
+    "default_temperature": 0.3,
+}
+
+# 兼容旧 import：PROVIDER_PROFILES（历史厂商表）。V1 不再维护差异，统一指向默认。
+PROVIDER_PROFILES: Dict[str, Dict[str, Any]] = {
+    "zhipu": dict(DEFAULT_PROVIDER_PROFILE),
+    "deepseek": dict(DEFAULT_PROVIDER_PROFILE),
+    "openrouter": dict(DEFAULT_PROVIDER_PROFILE),
+    "openai": dict(DEFAULT_PROVIDER_PROFILE),
+    "custom": dict(DEFAULT_PROVIDER_PROFILE),
+    "gemini": dict(DEFAULT_PROVIDER_PROFILE),
+    "ollama": dict(DEFAULT_PROVIDER_PROFILE),
+}
+
+# 按协议的可选覆盖（V1 很轻）
+PROTOCOL_PROFILES: Dict[str, Dict[str, Any]] = {
+    "openai_chat": {
         "extra_instructions": "Ensure JSON is valid. Avoid markdown wrapping.",
         "default_temperature": 0.3,
     },
-    "gemini": {
-        "extra_instructions": "Return raw JSON without code fences.",
-        "default_temperature": 0.2,
-    },
-    "openrouter": {
-        "extra_instructions": "",
-        "default_temperature": 0.3,
-    },
-    "ollama": {
-        "extra_instructions": "Be concise. Local model token budget is limited.",
-        "default_temperature": 0.1,
-    },
-    "deepseek": {
-        "extra_instructions": "Ensure JSON is valid. Avoid markdown wrapping.",
+    "anthropic_messages": {
+        "extra_instructions": "Return raw JSON only, no markdown code fences.",
         "default_temperature": 0.3,
     },
 }
 
-# 默认 Profile（未知 Provider 时使用）
-DEFAULT_PROVIDER_PROFILE = {
-    "extra_instructions": "",
-    "default_temperature": 0.3,
+# 历史厂商名 → protocol profile
+_LEGACY_ALIASES = {
+    "zhipu": "openai_chat",
+    "deepseek": "openai_chat",
+    "openrouter": "openai_chat",
+    "openai": "openai_chat",
+    "custom": "openai_chat",
+    "gemini": "default",
+    "ollama": "default",
 }
 
 
 def get_provider_profile(provider: str) -> dict:
-    """获取 Provider Profile
+    """获取 Profile。
 
     Args:
-        provider: Provider 名称（zhipu/gemini/openrouter/ollama/deepseek）
-
-    Returns:
-        dict: 包含 extra_instructions 和 default_temperature 的字典
+        provider: 可为 protocol 名、legacy 厂商名、或 Provider 显示名。
+                  未知时返回 DEFAULT_PROVIDER_PROFILE。
     """
-    return PROVIDER_PROFILES.get(provider, DEFAULT_PROVIDER_PROFILE)
+    key = (provider or "").strip().lower()
+    if not key:
+        return dict(DEFAULT_PROVIDER_PROFILE)
+
+    if key in PROTOCOL_PROFILES:
+        return dict(PROTOCOL_PROFILES[key])
+
+    mapped = _LEGACY_ALIASES.get(key)
+    if mapped and mapped in PROTOCOL_PROFILES:
+        return dict(PROTOCOL_PROFILES[mapped])
+
+    return dict(DEFAULT_PROVIDER_PROFILE)

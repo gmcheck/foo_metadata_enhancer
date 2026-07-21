@@ -113,7 +113,9 @@ class AIAdapter(DataSourceAdapter):
 
             logger.info(
                 f"AIAdapter::search_candidates: AI call OK, "
-                f"model={result.model}, tokens={result.tokens_used}, "
+                f"model={result.model}, "
+                f"tokens: total={result.tokens_used} prompt={result.prompt_tokens} "
+                f"completion={result.completion_tokens} reasoning={result.reasoning_tokens}, "
                 f"result_type={type(result.result).__name__}, "
                 f"result_size={len(str(result.result)) if result.result else 0}"
             )
@@ -262,18 +264,29 @@ Only include fields you can confidently identify."""
             return self._model_adapter.switch_provider(provider_type)
         return False
     
-    def get_available_providers(self) -> List[str]:
-        """获取可用的 AI 提供商列表
-        
+    def get_available_providers(self):
+        """获取可用的 AI Provider 实例列表（V1）。
+
         Returns:
-            List[str]: 提供商名称列表
+            list: 每项为 {id, name, protocol, model}；无 runtime 时返回 []
         """
         try:
-            from ai.providers import AIProviderFactory
-            return AIProviderFactory.get_available_providers()
-        except ImportError:
-            return ["openrouter", "zhipu", "gemini", "deepseek", "ollama"]
-    
+            from ai.provider_runtime import get_provider_runtime
+            rt = get_provider_runtime()
+            if rt is None:
+                return []
+            return [
+                {
+                    "id": p.get("id"),
+                    "name": p.get("name"),
+                    "protocol": p.get("protocol"),
+                    "model": p.get("model"),
+                }
+                for p in rt.store.list_providers(include_disabled=False)
+            ]
+        except Exception:
+            return []
+
     def get_provider_info(self) -> Dict[str, Any]:
         """获取当前提供商信息
         

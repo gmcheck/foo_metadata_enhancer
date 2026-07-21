@@ -6,7 +6,7 @@ Pydantic Models for AI Metadata Plugin (V8.2 单一来源)
 本模块仅定义 IPC 边界（ai_worker.py ↔ C++ ai_core.cpp）的 JSON 校验模型。
 
 V8.2 数据模型统一边界：
-  - IPC 边界模型（本文件）：Scrape* / Enhance* / IPCResponse
+  - IPC 边界模型（本文件）：Scrape* / Enhance* / IPCResponse / Provider*
   - 运行时 dataclass 模型：core/types.py（TrackInput）、data_sources/base.py
     （Candidate / FinalResult / QueryInput / ScrapingOptions / EnhancementOptions /
     DataSourceType / FallbackLevel）
@@ -395,3 +395,181 @@ def create_enhance_error_result(track_id: str, error_message: str) -> EnhanceRes
         success=False,
         error=error_message
     )
+
+
+# =============================================================================
+# Providers 层 IPC 模型（V1）
+# =============================================================================
+
+STATUS_SUCCESS = "success"
+STATUS_FAILED = "failed"
+DEFAULT_PROVIDER_ERROR_CATEGORY = "Request Failed"
+
+
+class ProviderTestDataModel(BaseModel):
+    """providers.test 的 data 载荷。
+
+    Attributes:
+        id: 被测 provider id（按 id 测时）
+        provider: 显示名
+        model: 模型名
+        protocol: openai_chat | anthropic_messages
+        latency_ms: 耗时毫秒
+        content_preview: 响应内容预览
+        http_status: HTTP 状态码（0 表示未知）
+    """
+    id: str = ""
+    provider: str = ""
+    model: str = ""
+    protocol: str = ""
+    latency_ms: int = 0
+    content_preview: str = ""
+    http_status: int = 0
+
+    @classmethod
+    def from_runtime_result(
+        cls,
+        raw: Optional[Dict[str, Any]] = None,
+        *,
+        provider_id: str = "",
+    ) -> "ProviderTestDataModel":
+        raw = raw or {}
+        http_status = raw.get("http_status")
+        try:
+            http_status_i = int(http_status or 0)
+        except (TypeError, ValueError):
+            http_status_i = 0
+        try:
+            latency_i = int(raw.get("latency_ms") or 0)
+        except (TypeError, ValueError):
+            latency_i = 0
+        return cls(
+            id=str(provider_id or raw.get("id") or ""),
+            provider=str(raw.get("provider") or ""),
+            model=str(raw.get("model") or ""),
+            protocol=str(raw.get("protocol") or ""),
+            latency_ms=latency_i,
+            content_preview=str(raw.get("content_preview") or ""),
+            http_status=http_status_i,
+        )
+
+
+class ProviderActionResultModel(BaseModel):
+    """providers.* 的 results[0] 统一载荷。
+
+    成功示例::
+        {
+          "status": "success",
+          "action": "test",
+          "data": { "provider": "Zhipu", "model": "...", ... }
+        }
+
+    失败示例::
+        {
+          "status": "failed",
+          "action": "test",
+          "error": "...",
+          "error_category": "Invalid Configuration",
+          "data": {}
+        }
+
+    规则：
+      - status 仅允许 success / failed
+      - data 始终为 object（可空）
+      - 成功时不输出 error / error_category
+      - 失败时 error / error_category 为非空字符串，禁止 null
+    """
+    status: str = STATUS_FAILED
+    action: str = ""
+    data: Dict[str, Any] = Field(default_factory=dict)
+    error: Optional[str] = None
+    error_category: Optional[str] = None
+
+    @field_validator("status", mode="before")
+    @classmethod
+    def validate_status(cls, v):
+        if v in (STATUS_SUCCESS, STATUS_FAILED):
+            return v
+        if v is True or str(v).lower() in ("1", "true", "ok", "success"):
+            return STATUS_SUCCESS
+        return STATUS_FAILED
+
+    @field_validator("data", mode="before")
+    @classmethod
+    def validate_data(cls, v):
+        if v is None:
+            return {}
+        if isinstance(v, BaseModel):
+            return v.model_dump()
+        if isinstance(v, dict):
+            return v
+        return {}
+
+    @property
+    def success(self) -> bool:
+        return self.status == STATUS_SUCCESS
+
+    def to_ipc_dict(self) -> Dict[str, Any]:
+        """序列化为 IPC results[0]（无 null 字段）。"""
+        out: Dict[str, Any] = {
+            "status": self.status if self.status in (STATUS_SUCCESS, STATUS_FAILED) else STATUS_FAILED,
+            "action": self.action or "",
+            "data": self.data if isinstance(self.data, dict) else {},
+        }
+        if out["status"] == STATUS_FAILED:
+            out["error"] = (self.error or "Unknown error").strip() or "Unknown error"
+            out["error_category"] = (
+                self.error_category or DEFAULT_PROVIDER_ERROR_CATEGORY
+            ).strip() or DEFAULT_PROVIDER_ERROR_CATEGORY
+        return out
+
+    @classmethod
+    def ok(cls, action: str, data: Optional[Any] = None) -> "ProviderActionResultModel":
+        if isinstance(data, BaseModel):
+            data_dict = data.model_dump()
+        elif isinstance(data, dict):
+            data_dict = data
+        else:
+            data_dict = {}
+        return cls(status=STATUS_SUCCESS, action=action or "", data=data_dict)
+
+    @classmethod
+    def fail(
+        cls,
+        action: str,
+        error: str,
+        *,
+        error_category: str = DEFAULT_PROVIDER_ERROR_CATEGORY,
+        data: Optional[Any] = None,
+    ) -> "ProviderActionResultModel":
+        if isinstance(data, BaseModel):
+            data_dict = data.model_dump()
+        elif isinstance(data, dict):
+            data_dict = data
+        else:
+            data_dict = {}
+        return cls(
+            status=STATUS_FAILED,
+            action=action or "",
+            data=data_dict,
+            error=str(error or "Unknown error"),
+            error_category=str(error_category or DEFAULT_PROVIDER_ERROR_CATEGORY),
+        )
+
+
+def create_provider_success(action: str, data: Optional[Any] = None) -> Dict[str, Any]:
+    """创建 providers 成功 results[0] 字典。"""
+    return ProviderActionResultModel.ok(action, data).to_ipc_dict()
+
+
+def create_provider_failure(
+    action: str,
+    error: str,
+    *,
+    error_category: str = DEFAULT_PROVIDER_ERROR_CATEGORY,
+    data: Optional[Any] = None,
+) -> Dict[str, Any]:
+    """创建 providers 失败 results[0] 字典。"""
+    return ProviderActionResultModel.fail(
+        action, error, error_category=error_category, data=data
+    ).to_ipc_dict()

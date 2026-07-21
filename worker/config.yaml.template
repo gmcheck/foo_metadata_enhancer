@@ -15,106 +15,15 @@ python:
   requirements_file: "requirements.txt"
 
 # AI Providers Configuration
-providers:
-  # Default AI provider
-  default: "zhipu"
-  
-  # Provider priority order (try in sequence until success)
-  priority_order:
-    - "zhipu"
-    - "gemini"
-    - "openrouter"
-    - "deepseek"
-    - "ollama"
-    - "custom"
-  
-  openrouter:
-    # OpenRouter API key (get from https://openrouter.ai/)
-    api_key: ""
-    # OpenRouter API base URL
-    base_url: "https://openrouter.ai/api/v1/chat/completions"
-    models:
-      - name: "openrouter/free"
-        priority: 1
-      - name: "z-ai/glm-4.5-air:free"
-        priority: 2
-      - name: "stepfun/step-3.5-flash:free"
-        priority: 3
-      - name: "google/gemma-3n-e4b-it:free"
-        priority: 4
-    extra_params:
-      temperature: 0.3
-  
-  zhipu:
-    # Zhipu AI API key (get from https://open.bigmodel.cn/)
-    api_key: ""
-    # Zhipu AI API base URL
-    base_url: "https://open.bigmodel.cn/api/paas/v4/chat/completions"
-    models:
-      - name: "glm-4.7-flash"
-        priority: 1
-      - name: "glm-4-Flash-250414"
-        priority: 2
-      - name: "glm-4.5-air"
-        priority: 3
-      - name: "glm-5"
-        priority: 4
-    extra_params:
-      temperature: 0.3
-  
-  gemini:
-    # Google Gemini API key (get from https://aistudio.google.com/)
-    api_key: ""
-    # Google Gemini API base URL
-    base_url: "https://generativelanguage.googleapis.com/v1beta/models"
-    models:
-      - name: "gemini-2.0-flash"
-        priority: 1
-      - name: "gemini-1.5-flash"
-        priority: 2
-      - name: "gemini-1.5-pro"
-        priority: 3
-    extra_params:
-      temperature: 0.3
-
-  deepseek:
-    # DeepSeek API key (get from https://platform.deepseek.com/)
-    api_key: ""
-    # DeepSeek API base URL (OpenAI-compatible)
-    base_url: "https://api.deepseek.com/v1/chat/completions"
-    models:
-      - name: "deepseek-chat"
-        priority: 1
-      - name: "deepseek-reasoner"
-        priority: 2
-    extra_params:
-      temperature: 0.3
-
-  ollama:
-    # Enable Ollama local model
-    enabled: false
-    # Ollama API base URL
-    base_url: "http://localhost:11434/api/chat"
-    models:
-      - name: "llama3"
-        priority: 1
-      - name: "qwen2.5"
-        priority: 2
-      - name: "mistral"
-        priority: 3
-    extra_params:
-      num_ctx: 4096
-
-  custom:
-    # Custom model provider - user configurable endpoint
-    # Supports OpenAI Chat Completions and Anthropic Messages formats
-    api_key: ""
-    base_url: ""
-    models:
-      - name: "custom-model"
-        priority: 1
-    extra_params:
-      api_format: "openai"
+# -----------------------------------------------------------------------------
+# V1: Provider 实例存储在 Python SQLite（providers 表），不再使用本段厂商槽位。
+# 请在 foobar2000 Preferences → AI Metadata → Provider 列表中配置：
+#   name / protocol(openai_chat|anthropic_messages) / base_url / api_key / model
+# Worker 业务路径只读取 SQLite 中的 current_provider，不会再读取本段。
+# 首次启动若 providers 表为空，会 seed Zhipu/DeepSeek/OpenRouter 预设（api_key 为空）。
+# 旧 settings.json 的 provider_configs 会一次性迁移进 SQLite。
+# -----------------------------------------------------------------------------
+providers: {}
 
 # Worker Configuration
 worker:

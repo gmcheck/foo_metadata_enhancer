@@ -23,32 +23,32 @@ void set_auto_install_packages(bool auto_install) {
     g_auto_install_packages = auto_install;
 }
 
-static bool run_command_hidden(const std::string& cmd, std::string& output) {
+static bool run_command_hidden(const std::string& cmd, std::string& output, int* exit_code = nullptr) {
     SECURITY_ATTRIBUTES sa;
     sa.nLength = sizeof(SECURITY_ATTRIBUTES);
     sa.bInheritHandle = TRUE;
     sa.lpSecurityDescriptor = nullptr;
-    
+
     HANDLE hReadPipe = nullptr;
     HANDLE hWritePipe = nullptr;
-    
+
     if (!CreatePipe(&hReadPipe, &hWritePipe, &sa, 0)) {
         return false;
     }
     SetHandleInformation(hReadPipe, HANDLE_FLAG_INHERIT, 0);
-    
+
     STARTUPINFOA si;
     ZeroMemory(&si, sizeof(si));
     si.cb = sizeof(si);
     si.hStdOutput = hWritePipe;
     si.hStdError = hWritePipe;
     si.dwFlags = STARTF_USESTDHANDLES;
-    
+
     PROCESS_INFORMATION pi;
     ZeroMemory(&pi, sizeof(pi));
-    
+
     std::string cmd_line = cmd;
-    
+
     BOOL result = CreateProcessA(
         nullptr,
         const_cast<char*>(cmd_line.c_str()),
@@ -61,29 +61,38 @@ static bool run_command_hidden(const std::string& cmd, std::string& output) {
         &si,
         &pi
     );
-    
+
     CloseHandle(hWritePipe);
-    
+
     if (!result) {
         CloseHandle(hReadPipe);
         return false;
     }
-    
+
     char buffer[128];
     DWORD bytes_read;
-    
+
     while (ReadFile(hReadPipe, buffer, sizeof(buffer) - 1, &bytes_read, nullptr) && bytes_read > 0) {
         buffer[bytes_read] = '\0';
         output += buffer;
     }
-    
+
     CloseHandle(hReadPipe);
-    
+
     WaitForSingleObject(pi.hProcess, constants::PROCESS_WAIT_TIMEOUT_MS);
-    
+
+    if (exit_code != nullptr) {
+        DWORD code = 0;
+        if (GetExitCodeProcess(pi.hProcess, &code)) {
+            *exit_code = static_cast<int>(code);
+        } else {
+            *exit_code = -1;
+        }
+    }
+
     CloseHandle(pi.hProcess);
     CloseHandle(pi.hThread);
-    
+
     return true;
 }
 
@@ -863,28 +872,28 @@ bool WorkerManager::check_and_install_dependencies() {
     for (const auto& package : required_packages) {
         if (!is_package_installed(package)) {
             Logger::instance().debug("check_and_install_dependencies: Installing " + package, __FILE__, __FUNCTION__);
-            
+
+            // 使用 run_command_hidden（CREATE_NO_WINDOW）避免弹出 cmd 窗口
             std::string install_cmd = "\"" + python_exe + "\" -m pip install " + package + " --quiet";
-            FILE* pipe = _popen(install_cmd.c_str(), "r");
-            if (pipe) {
-                char buffer[256];
-                while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
-                    Logger::instance().debug("check_and_install_dependencies: pip output: " + std::string(buffer), __FILE__, __FUNCTION__);
-                }
-                int result = _pclose(pipe);
-                if (result != 0) {
-                    LOG_ERROR("check_and_install_dependencies: Failed to install " + package);
-                    all_installed = false;
-                } else {
-                    Logger::instance().debug("check_and_install_dependencies: Successfully installed " + package, __FILE__, __FUNCTION__);
-                }
-            } else {
+            std::string pip_output;
+            int exit_code = -1;
+            if (!run_command_hidden(install_cmd, pip_output, &exit_code)) {
                 LOG_ERROR("check_and_install_dependencies: Failed to run pip for " + package);
                 all_installed = false;
+                continue;
+            }
+            if (!pip_output.empty()) {
+                Logger::instance().debug("check_and_install_dependencies: pip output: " + pip_output, __FILE__, __FUNCTION__);
+            }
+            if (exit_code != 0) {
+                LOG_ERROR("check_and_install_dependencies: Failed to install " + package + " (exit=" + std::to_string(exit_code) + ")");
+                all_installed = false;
+            } else {
+                Logger::instance().debug("check_and_install_dependencies: Successfully installed " + package, __FILE__, __FUNCTION__);
             }
         }
     }
-    
+
     return all_installed;
 }
 
@@ -893,14 +902,15 @@ bool WorkerManager::is_package_installed(const std::string& package_name) {
     if (python_exe.empty()) {
         return false;
     }
-    
+
+    // 使用 run_command_hidden（CREATE_NO_WINDOW）避免弹出 cmd 窗口
     std::string check_cmd = "\"" + python_exe + "\" -c \"import " + package_name + "\" 2>&1";
-    FILE* pipe = _popen(check_cmd.c_str(), "r");
-    if (pipe) {
-        int result = _pclose(pipe);
-        return result == 0;
+    std::string output;
+    int exit_code = -1;
+    if (!run_command_hidden(check_cmd, output, &exit_code)) {
+        return false;
     }
-    return false;
+    return exit_code == 0;
 }
 
 }

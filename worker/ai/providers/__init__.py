@@ -1,37 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-AI Providers Module
-Provides unified interface for multiple AI providers
+"""Legacy package shim.
+
+厂商 Provider 类已删除。业务请使用:
+  - ai.provider_runtime / ai.protocols
+  - ai.types.AIResponse
 """
 
-from .base import (
-    ProviderType,
-    AIResponse,
-    ProviderConfig,
-    BaseAIProvider,
-)
-from .openrouter_provider import OpenRouterProvider
-from .ollama_provider import OllamaProvider
-from .zhipu_provider import ZhipuProvider
-from .gemini_provider import GeminiProvider
-from .deepseek_provider import DeepSeekProvider
-from .openai_provider import OpenAIProvider
-from .custom_provider import CustomProvider
-from .factory import AIProviderFactory, create_provider
+from ai.types import AIResponse
 
-__all__ = [
-    "ProviderType",
-    "AIResponse",
-    "ProviderConfig",
-    "BaseAIProvider",
-    "OpenAIProvider",
-    "OpenRouterProvider",
-    "OllamaProvider",
-    "ZhipuProvider",
-    "GeminiProvider",
-    "DeepSeekProvider",
-    "CustomProvider",
-    "AIProviderFactory",
-    "create_provider",
-]
+__all__ = ["AIResponse"]

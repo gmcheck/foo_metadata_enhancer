@@ -511,7 +511,7 @@ class MusicBrainzAdapter(DataSourceAdapter):
                 logger.debug(f"MusicBrainz: Abort before strategy '{strategy_name}'")
                 break
             
-            logger.debug(f"MusicBrainz: Trying strategy '{strategy_name}'")
+            logger.info(f"MusicBrainz: Trying strategy '{strategy_name}'")
             
             for page in range(self._max_pages):
                 if self._is_aborted():
@@ -575,7 +575,7 @@ class MusicBrainzAdapter(DataSourceAdapter):
             
             if self._has_good_match(all_recordings):
                 break
-        
+        logger.info(f"MusicBrainz: Normal matches found (strategy={strategy_name}, page={page+1})")
         return all_recordings
     
     def search_candidates(self, query: QueryInput) -> List[Candidate]:
@@ -589,7 +589,7 @@ class MusicBrainzAdapter(DataSourceAdapter):
         Returns:
             List[Candidate]: 候选列表
         """
-        logger.debug(f"MusicBrainzAdapter::search_candidates: title='{query.title}', artist='{query.artist}'")
+        logger.info(f"MusicBrainzAdapter::search_candidates: title='{query.title}', artist='{query.artist}', album='{query.album or ''}'")
         
         if not self.is_enabled:
             logger.warning("MusicBrainz adapter is not enabled")
@@ -668,7 +668,7 @@ class MusicBrainzAdapter(DataSourceAdapter):
             # 需要按 mbid 单独 lookup）。仅对前 N 个候选做 lookup，控制 API 调用量。
             self._populate_genres_for_top_candidates(candidates, top_n=3)
 
-            logger.debug(f"MusicBrainz: Returning {len(candidates)} candidates")
+            logger.info(f"MusicBrainz: Returning {len(candidates)} candidates")
             return candidates
 
         except Exception as e:

@@ -329,6 +329,191 @@ std::string AICore::test_api_connection(
     return result.dump();
 }
 
+
+std::string AICore::providers_request(
+    const std::string& action,
+    const std::string& params_json,
+    uint32_t timeout_ms
+) {
+    if (!initialized_ || !worker_manager_) {
+        nlohmann::json error_result;
+        error_result["success"] = false;
+        error_result["error"] = "AICore not initialized";
+        return error_result.dump();
+    }
+
+    nlohmann::json params = nlohmann::json::object();
+    if (!params_json.empty()) {
+        try {
+            auto parsed = nlohmann::json::parse(params_json);
+            if (parsed.is_object()) {
+                params = std::move(parsed);
+            }
+        } catch (const std::exception&) {
+            nlohmann::json error_result;
+            error_result["success"] = false;
+            error_result["error"] = "Invalid params JSON";
+            return error_result.dump();
+        }
+    }
+    params["action"] = action;
+
+    std::string request_id = generate_uuid();
+    nlohmann::json request;
+    request["id"] = request_id;
+    request["method"] = "providers";
+    request["jsonrpc"] = "2.0";
+    request["params"] = params;
+
+    std::string request_str = request.dump();
+
+    auto response_promise = std::make_shared<std::promise<BatchResponse>>();
+    std::future<BatchResponse> response_future = response_promise->get_future();
+
+    bool sent = worker_manager_->send_request(
+        request_id,
+        request_str,
+        [response_promise](const std::string&, const BatchResponse& resp) {
+            response_promise->set_value(resp);
+        },
+        [response_promise](const std::string&, const ErrorInfo& err) {
+            BatchResponse resp;
+            resp.success = false;
+            resp.error = err;
+            response_promise->set_value(resp);
+        }
+    );
+
+    if (!sent) {
+        nlohmann::json error_result;
+        error_result["success"] = false;
+        error_result["error"] = "Failed to send request to worker";
+        return error_result.dump();
+    }
+
+    auto status = response_future.wait_for(std::chrono::milliseconds(timeout_ms));
+    if (status != std::future_status::ready) {
+        nlohmann::json error_result;
+        error_result["success"] = false;
+        error_result["error"] = "Providers request timed out after " + std::to_string(timeout_ms) + "ms";
+        return error_result.dump();
+    }
+
+    BatchResponse response = response_future.get();
+
+    // 统一 UI 契约：
+    // {
+    //   success, status("success"|"failed"), action, data{},
+    //   error(""), error_category("")
+    // }
+    // 字段始终存在且为可解析类型，禁止 null。
+    nlohmann::json out = nlohmann::json::object();
+    out["success"] = false;
+    out["status"] = "failed";
+    out["action"] = action;
+    out["data"] = nlohmann::json::object();
+    out["error"] = "";
+    out["error_category"] = "";
+
+    auto as_string = [](const nlohmann::json& j, const char* key, const std::string& fallback = "") -> std::string {
+        if (!j.contains(key) || j[key].is_null()) return fallback;
+        if (j[key].is_string()) return j[key].get<std::string>();
+        return j[key].dump();
+    };
+
+    if (response.error.has_value()) {
+        out["success"] = false;
+        out["status"] = "failed";
+        out["error"] = response.error->message.empty() ? "Request failed" : response.error->message;
+        out["error_code"] = response.error->code;
+        out["error_category"] = "Request Failed";
+        return out.dump();
+    }
+
+    if (!response.results.empty() && response.results[0].is_object()) {
+        const auto& payload = response.results[0];
+        const std::string status = as_string(payload, "status", response.success ? "success" : "failed");
+        const bool ok = (status == "success") || (response.success && status != "failed");
+
+        out["status"] = ok ? "success" : "failed";
+        out["success"] = ok;
+        out["action"] = as_string(payload, "action", action);
+
+        if (payload.contains("data") && payload["data"].is_object()) {
+            out["data"] = payload["data"];
+        } else {
+            // 兼容旧 payload：把非元字段收进 data
+            nlohmann::json data = payload;
+            for (const char* k : {"status", "action", "error", "error_category", "success"}) {
+                data.erase(k);
+            }
+            out["data"] = data.is_object() ? data : nlohmann::json::object();
+        }
+
+        out["error"] = ok ? "" : as_string(payload, "error", "Request failed");
+        out["error_category"] = ok ? "" : as_string(payload, "error_category", "Request Failed");
+        return out.dump();
+    }
+
+    out["success"] = response.success;
+    out["status"] = response.success ? "success" : "failed";
+    if (!response.success) {
+        out["error"] = "Unknown error";
+        out["error_category"] = "Request Failed";
+    }
+    return out.dump();
+}
+
+std::string AICore::providers_list(bool include_api_key, uint32_t timeout_ms) {
+    nlohmann::json params;
+    params["include_api_key"] = include_api_key;
+    return providers_request("list", params.dump(), timeout_ms);
+}
+
+std::string AICore::providers_get(const std::string& provider_id, bool include_api_key, uint32_t timeout_ms) {
+    nlohmann::json params;
+    params["id"] = provider_id;
+    params["include_api_key"] = include_api_key;
+    return providers_request("get", params.dump(), timeout_ms);
+}
+
+std::string AICore::providers_create(const std::string& provider_json, uint32_t timeout_ms) {
+    return providers_request("create", provider_json.empty() ? "{}" : provider_json, timeout_ms);
+}
+
+std::string AICore::providers_update(const std::string& provider_json, uint32_t timeout_ms) {
+    return providers_request("update", provider_json.empty() ? "{}" : provider_json, timeout_ms);
+}
+
+std::string AICore::providers_delete(const std::string& provider_id, uint32_t timeout_ms) {
+    nlohmann::json params;
+    params["id"] = provider_id;
+    return providers_request("delete", params.dump(), timeout_ms);
+}
+
+std::string AICore::providers_set_current(const std::string& provider_id, uint32_t timeout_ms) {
+    nlohmann::json params;
+    params["id"] = provider_id;
+    return providers_request("set_current", params.dump(), timeout_ms);
+}
+
+std::string AICore::providers_get_current(bool include_api_key, uint32_t timeout_ms) {
+    nlohmann::json params;
+    params["include_api_key"] = include_api_key;
+    return providers_request("get_current", params.dump(), timeout_ms);
+}
+
+std::string AICore::providers_test(const std::string& draft_or_id_json, uint32_t timeout_ms) {
+    return providers_request("test", draft_or_id_json.empty() ? "{}" : draft_or_id_json, timeout_ms);
+}
+
+std::string AICore::providers_restore_presets(bool overwrite_existing_names, uint32_t timeout_ms) {
+    nlohmann::json params;
+    params["overwrite_existing_names"] = overwrite_existing_names;
+    return providers_request("restore_presets", params.dump(), timeout_ms);
+}
+
+
 std::vector<TrackScrapingResult> AICore::scrape_sync(
     const std::vector<TrackInput>& tracks,
     const ScrapingOptions& options,

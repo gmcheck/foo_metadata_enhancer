@@ -163,7 +163,23 @@ class AIResolver:
                 heartbeat_stop.set()
                 hb_thread.join(timeout=2.0)
 
-            logger.info(f"AIResolver::resolve_batch: model_adapter.analyze returned, success={result.success}, elapsed_ms={int((_time.time()-_t0)*1000)}")
+            logger.info(
+                f"AIResolver::resolve_batch: model_adapter.analyze returned, "
+                f"success={result.success}, "
+                f"tokens: total={result.tokens_used} prompt={result.prompt_tokens} "
+                f"completion={result.completion_tokens} reasoning={result.reasoning_tokens}, "
+                f"tracks={len(queries)}, enhanced={enhanced}, "
+                f"elapsed_ms={int((_time.time()-_t0)*1000)}"
+            )
+            # 仅当 reasoning_tokens 异常大时才告警（>5000，约 3x prompt）。
+            # 像 deepseek-v4-flash 这类带轻度推理的模型通常 <500 token，属正常范围。
+            # 真正需要警惕的是 R1/o1 系，单次 reasoning 可达 5w-10w。
+            if result.success and result.reasoning_tokens > 5000:
+                logger.warning(
+                    f"AIResolver::resolve_batch: reasoning_tokens={result.reasoning_tokens} "
+                    f"detected (model={result.model}). Reasoning model used for scrape decision "
+                    f"may cause excessive token consumption. Consider switching to a non-reasoning model."
+                )
 
             if not result.success:
                 logger.warning(f"AI resolve_batch failed: {result.error}")

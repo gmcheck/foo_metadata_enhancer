@@ -85,12 +85,23 @@ class PromptComposer:
 
     @property
     def provider_name(self) -> str:
-        """当前 Provider 名称"""
+        """当前 Provider 名称/协议（用于 profile；优先 runtime current）"""
+        try:
+            from ai.provider_runtime import get_provider_runtime
+
+            rt = get_provider_runtime()
+            if rt is not None:
+                row = rt.get_active_row()
+                if row:
+                    # profile 按 protocol 取；未知则用 name
+                    return str(row.get("protocol") or row.get("name") or "")
+        except Exception:
+            pass
         return self._config.get("providers", {}).get("default", "")
 
     @property
     def provider_extra_instructions(self) -> str:
-        """Provider 特定提示"""
+        """Provider/protocol 特定提示（V1 统一默认 + 轻量 protocol 差异）"""
         return get_provider_profile(self.provider_name).get("extra_instructions", "")
 
     # =========================================================================

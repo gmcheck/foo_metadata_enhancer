@@ -131,10 +131,10 @@ class ScrapingResult:
 
 class ScrapeProcessor:
     """阶段一处理器
-    
+
     V8.1 数据流架构：
     Cache → DataSourceManager(并发) → Aggregator → AIResolver
-    
+
     功能：
     1. 前置检查：TITLE 和 ARTIST 必须存在
     2. 缓存优先查询
@@ -142,8 +142,12 @@ class ScrapeProcessor:
     4. 候选聚合
     5. AI 决策
     """
-    
+
     REQUIRED_FIELDS = ["title", "artist"]
+
+    # 高质量匹配阈值：与 DataSourceManager.HIGH_QUALITY_CONFIDENCE 一致。
+    # 候选中已有 confidence >= 此值时，直接选用最佳候选，跳过 AIResolver。
+    HIGH_QUALITY_CONFIDENCE = 0.85
     
     def __init__(self, config: Dict[str, Any], backup_db_path: str = None):
         """初始化阶段一处理器
@@ -268,7 +272,16 @@ class ScrapeProcessor:
                     f"candidates={len(candidates)}"
                 )
 
-                if len(candidates) >= 3:
+                # 已有高质量匹配时（如 MB 通过 MatchDecision 早停），直接选用最佳候选，
+                # 跳过 AIResolver。避免 MB 已给出可信结果仍调用 AI 的浪费。
+                if candidates and max(c.confidence for c in candidates) >= self.HIGH_QUALITY_CONFIDENCE:
+                    logger.info(
+                        f"ScrapeProcessor::scrape: track {i+1} high-quality match found "
+                        f"(best_conf={max(c.confidence for c in candidates):.2f}), "
+                        f"selecting best candidate directly without AI"
+                    )
+                    results[i] = self._build_direct_result(track, query, candidates)
+                elif len(candidates) >= 3:
                     pending_normal.append((track, query, candidates))
                     pending_normal_indices.append(i)
                 else:
@@ -354,7 +367,70 @@ class ScrapeProcessor:
         
         return results
     
-    def _scrape_single_prepare(self, track: TrackInput, 
+    def _build_direct_result(self, track: TrackInput, query: QueryInput,
+                             candidates: List[Candidate]) -> ScrapingResult:
+        """已有高质量匹配时，直接选最佳候选构造结果（不调用 AI）
+
+        MB 已通过 MatchDecision 判定找到高质量匹配时，无需再触发 AIResolver 决策。
+        逻辑等价于 AIResolver._select_best_candidate，但避免一次 AI 调用。
+
+        Args:
+            track: 音轨输入
+            query: 查询输入
+            candidates: 候选列表（已含 confidence >= HIGH_QUALITY_CONFIDENCE 的项）
+
+        Returns:
+            ScrapingResult: 直接从最佳候选构造的结果
+        """
+        if not candidates:
+            return ScrapingResult(
+                track_id=track.track_id,
+                success=False,
+                error="No candidates available"
+            )
+
+        sorted_candidates = sorted(candidates, key=lambda c: c.confidence, reverse=True)
+        best = sorted_candidates[0]
+
+        sources = best.sources if best.sources else [best.source]
+
+        final_result = FinalResult(
+            title=best.title or query.title,
+            artist=best.artist or query.artist,
+            album=best.album,
+            year=best.year,
+            track_number=best.track_number,
+            disc_number=best.disc_number,
+            genre=best.genre,
+            composer=best.composer,
+            lyricist=best.lyricist,
+            label=best.label,
+            country=best.country,
+            catalog_number=best.catalog_number,
+            musicbrainz_id=best.musicbrainz_id,
+            confidence=best.confidence,
+            source=best.source.value if isinstance(best.source, DataSourceType) else str(best.source),
+            sources=[s.value if isinstance(s, DataSourceType) else str(s) for s in sources],
+            is_fallback=False
+        )
+
+        logger.info(
+            f"ScrapeProcessor::_build_direct_result: track_id={track.track_id}, "
+            f"source={best.source.value if isinstance(best.source, DataSourceType) else best.source}, "
+            f"confidence={best.confidence:.2f}, skipped AI call"
+        )
+
+        return ScrapingResult(
+            track_id=track.track_id,
+            success=True,
+            final=final_result,
+            candidates=candidates,
+            fallback_level="direct",
+            fallback_used=False,
+            cache_hit=False
+        )
+
+    def _scrape_single_prepare(self, track: TrackInput,
                                 options: ScrapingOptions) -> Optional[ScrapingResult]:
         """处理准备阶段（Python端缓存已移除，始终返回None）
         

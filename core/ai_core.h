@@ -335,6 +335,50 @@ public:
         const std::string& provider_cfg_json = ""
     );
 
+    /**
+     * @brief Providers 管理 IPC（V1）
+     * @param action list|get|create|update|delete|set_current|get_current|test|restore_presets
+     * @param params_json 动作参数 JSON 对象字符串（可为空对象）
+     * @param timeout_ms 超时毫秒
+     * @return 统一 JSON 字符串：{success, result?, error?, error_code?}
+     */
+    std::string providers_request(
+        const std::string& action,
+        const std::string& params_json = "{}",
+        uint32_t timeout_ms = 30000
+    );
+
+    /** @brief 列出 providers */
+    std::string providers_list(bool include_api_key = false, uint32_t timeout_ms = 30000);
+
+    /** @brief 获取单个 provider（默认含 api_key） */
+    std::string providers_get(const std::string& provider_id, bool include_api_key = true, uint32_t timeout_ms = 30000);
+
+    /** @brief 创建 provider；provider_json 为字段对象 */
+    std::string providers_create(const std::string& provider_json, uint32_t timeout_ms = 30000);
+
+    /** @brief 更新 provider；provider_json 需含 id */
+    std::string providers_update(const std::string& provider_json, uint32_t timeout_ms = 30000);
+
+    /** @brief 删除 provider */
+    std::string providers_delete(const std::string& provider_id, uint32_t timeout_ms = 30000);
+
+    /** @brief 设置当前 provider */
+    std::string providers_set_current(const std::string& provider_id, uint32_t timeout_ms = 30000);
+
+    /** @brief 获取当前 provider */
+    std::string providers_get_current(bool include_api_key = false, uint32_t timeout_ms = 30000);
+
+    /**
+     * @brief 测试连接
+     * @param draft_or_id_json 可为 {"id":"..."} 或草稿字段 / {"draft":{...}}
+     */
+    std::string providers_test(const std::string& draft_or_id_json, uint32_t timeout_ms = 30000);
+
+    /** @brief 恢复 seed 预设 */
+    std::string providers_restore_presets(bool overwrite_existing_names = false, uint32_t timeout_ms = 30000);
+
+
 private:
     std::string generate_request_id();
     
