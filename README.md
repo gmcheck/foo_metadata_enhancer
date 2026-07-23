@@ -30,6 +30,11 @@ Additional capabilities:
 - **Configurable Translation Style** - Three translation strategies: official / literal / semantic
 - **Manual Confirmation for Uncertain Results** - When web search is unavailable (e.g., Zhipu Chat), uncertain results are saved and the user is prompted to confirm
 
+![manu](image-2.png)
+![scrape](image.png)
+![enhance](image-1.png)
+
+
 ## Requirements
 
 - Register and get API KEY from AI (ZHIPU AI is recommended,this is a free ai service for some models now.Ref to https://bigmodel.cn/console/overview).
