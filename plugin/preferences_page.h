@@ -340,6 +340,8 @@ private:
     void on_export_templates();
     void on_changed();
     void update_worker_status_display();
+    /// 将 python 路径写入运行时 + SettingsManager + settings.json
+    void persist_python_runtime(const std::string& path, bool auto_install_packages);
 
     // Providers V1 UI (IPC)
     void refresh_provider_list();

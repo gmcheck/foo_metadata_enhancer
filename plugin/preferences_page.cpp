@@ -153,6 +153,10 @@ void SettingsManager::do_ensure_initialized() {
     load();
     Logger::instance().set_log_level(m_settings.log_level);
     set_auto_install_packages(m_settings.auto_install_packages);
+    // load() 仅在路径非空时 set_python_path；这里统一再同步一次
+    if (!m_settings.python_path.empty()) {
+        set_python_path(m_settings.python_path);
+    }
     save();
     
     m_initialized = true;
@@ -738,8 +742,26 @@ void SettingsManager::load() {
     
     std::string python_path = get_value("python_path");
     if (!python_path.empty()) {
-        m_settings.python_path = python_path;
-        set_python_path(python_path);
+        // 还原 JSON 转义的反斜杠（save 使用 json_escape_string）
+        std::string unescaped;
+        unescaped.reserve(python_path.size());
+        for (size_t i = 0; i < python_path.size(); ++i) {
+            if (python_path[i] == '\\' && i + 1 < python_path.size()) {
+                char n = python_path[i + 1];
+                switch (n) {
+                    case '\\': unescaped.push_back('\\'); ++i; break;
+                    case '"':  unescaped.push_back('"');  ++i; break;
+                    case 'n':  unescaped.push_back('\n'); ++i; break;
+                    case 'r':  unescaped.push_back('\r'); ++i; break;
+                    case 't':  unescaped.push_back('\t'); ++i; break;
+                    default:   unescaped.push_back(python_path[i]); break;
+                }
+            } else {
+                unescaped.push_back(python_path[i]);
+            }
+        }
+        m_settings.python_path = unescaped;
+        set_python_path(unescaped);
     }
     
     std::string auto_install = get_value("auto_install_packages");
@@ -1002,7 +1024,8 @@ void SettingsManager::save() {
     if (file.is_open()) {
         file << "{\n";
         // V1: providers 列表不再写入 settings.json（权威源为 Python SQLite）
-        file << "  \"python_path\": \"" << m_settings.python_path << "\",\n";
+        // Windows 路径含反斜杠，必须 JSON 转义，否则 load 解析会截断
+        file << "  \"python_path\": " << json_escape_string(m_settings.python_path) << ",\n";
         file << "  \"auto_install_packages\": " << (m_settings.auto_install_packages ? "true" : "false") << ",\n";
         
         file << "  \"cache_enabled\": " << (m_settings.cache_enabled ? "true" : "false") << ",\n";
@@ -1249,9 +1272,16 @@ void AIPreferencePageInstance::apply() {
     auto old_settings = SettingsManager::instance().settings();
     auto old_log_level = old_settings.log_level;
 
+    // 多页偏好共用 PluginSettings：Apply 时以全局已保存配置为底，
+    // 再叠加当前页控件值，避免其它页上的字段（如 python_path）被空值覆盖。
+    m_settings = old_settings;
     save_settings();
     SettingsManager::instance().settings() = m_settings;
     SettingsManager::instance().save();
+    if (!m_settings.python_path.empty()) {
+        set_python_path(m_settings.python_path);
+    }
+    Logger::instance().info("apply: saved python_path=" + m_settings.python_path, __FILE__, __FUNCTION__);
 
     AICore* ai_core = get_ai_core_instance();
     if (ai_core) {
@@ -1338,6 +1368,7 @@ INT_PTR CALLBACK AIPreferencePageInstance::dialog_proc(HWND wnd, UINT msg, WPARA
                 case IDC_LOG_SIZE:
                 case IDC_DISCOGS_KEY:
                 case IDC_DISCOGS_SECRET:
+                case IDC_PYTHON_PATH:
                     if (HIWORD(wp) == EN_CHANGE) {
                         self->on_changed();
                     }
@@ -1614,7 +1645,7 @@ void AIPreferencePageInstance::update_controls() {
 
 
 void AIPreferencePageInstance::save_settings() {
-    char buffer[256];
+    char buffer[MAX_PATH] = {0};
     
     // V1: Provider 配置不经 settings.json，由 providers IPC 直接写 SQLite
     
@@ -1626,7 +1657,10 @@ void AIPreferencePageInstance::save_settings() {
         m_settings.auto_install_packages = IsDlgButtonChecked(m_wnd, IDC_AUTO_INSTALL_PACKAGES) == BST_CHECKED;
     }
     
-    set_python_path(m_settings.python_path);
+    // 仅非空时推到运行时，避免其它页 Apply 在未合并 old_settings 时误清空
+    if (!m_settings.python_path.empty()) {
+        set_python_path(m_settings.python_path);
+    }
     set_auto_install_packages(m_settings.auto_install_packages);
     
     if (GetDlgItem(m_wnd, IDC_ENABLE_CACHE)) {
@@ -1870,8 +1904,49 @@ void AIPreferencePageInstance::on_clear_cache() {
     }
 }
 
+void AIPreferencePageInstance::persist_python_runtime(const std::string& path, bool auto_install_packages) {
+    m_settings.python_path = path;
+    m_settings.auto_install_packages = auto_install_packages;
+    if (!path.empty()) {
+        set_python_path(path);
+    }
+    set_auto_install_packages(auto_install_packages);
+    auto& global = SettingsManager::instance().settings();
+    global.python_path = path;
+    global.auto_install_packages = auto_install_packages;
+    SettingsManager::instance().save();
+}
+
 void AIPreferencePageInstance::on_restart_workers() {
     Logger::instance().info("on_restart_workers: ENTER", __FILE__, __FUNCTION__);
+
+    // Restart 在 Processing 页（无 IDC_PYTHON_PATH）；General 页有控件时优先读 UI。
+    // 始终把已保存/当前路径同步到 WorkerManager，再 initialize。
+    std::string path = SettingsManager::instance().settings().python_path;
+    bool auto_install = SettingsManager::instance().settings().auto_install_packages;
+    if (GetDlgItem(m_wnd, IDC_PYTHON_PATH)) {
+        char buffer[MAX_PATH] = {0};
+        GetDlgItemTextA(m_wnd, IDC_PYTHON_PATH, buffer, sizeof(buffer));
+        path = buffer;
+        if (GetDlgItem(m_wnd, IDC_AUTO_INSTALL_PACKAGES)) {
+            auto_install = IsDlgButtonChecked(m_wnd, IDC_AUTO_INSTALL_PACKAGES) == BST_CHECKED;
+        }
+    }
+    if (!path.empty()) {
+        persist_python_runtime(path, auto_install);
+    } else {
+        // 尚未配置：尝试自动检测并落盘，便于首次使用
+        std::string detected = SettingsManager::instance().auto_detect_python_path();
+        if (!detected.empty()) {
+            persist_python_runtime(detected, auto_install);
+            path = detected;
+            if (GetDlgItem(m_wnd, IDC_PYTHON_PATH)) {
+                SetDlgItemTextA(m_wnd, IDC_PYTHON_PATH, path.c_str());
+            }
+        }
+    }
+    Logger::instance().info("on_restart_workers: synced python_path=" + path, __FILE__, __FUNCTION__);
+
     AICore* ai_core = get_ai_core_instance();
     if (!ai_core) {
         Logger::instance().error("on_restart_workers: ai_core is null", __FILE__, __FUNCTION__);
@@ -1933,7 +2008,12 @@ void AIPreferencePageInstance::on_browse_python() {
 
     if (GetOpenFileNameA(&ofn)) {
         SetDlgItemTextA(m_wnd, IDC_PYTHON_PATH, buffer);
-        m_settings.python_path = buffer;
+        bool auto_install = m_settings.auto_install_packages;
+        if (GetDlgItem(m_wnd, IDC_AUTO_INSTALL_PACKAGES)) {
+            auto_install = IsDlgButtonChecked(m_wnd, IDC_AUTO_INSTALL_PACKAGES) == BST_CHECKED;
+        }
+        // Detect/Browse 立即落盘 + 同步运行时，Apply 前 Restart 也能用
+        persist_python_runtime(buffer, auto_install);
         on_changed();
 
         std::string status_text = "Status: " + std::string(buffer);
@@ -1957,7 +2037,11 @@ void AIPreferencePageInstance::on_detect_python() {
     }
 
     SetDlgItemTextA(m_wnd, IDC_PYTHON_PATH, detected.c_str());
-    m_settings.python_path = detected;
+    bool auto_install = m_settings.auto_install_packages;
+    if (GetDlgItem(m_wnd, IDC_AUTO_INSTALL_PACKAGES)) {
+        auto_install = IsDlgButtonChecked(m_wnd, IDC_AUTO_INSTALL_PACKAGES) == BST_CHECKED;
+    }
+    persist_python_runtime(detected, auto_install);
     on_changed();
 
     std::string status_text = "Status: " + detected;

@@ -96,9 +96,36 @@ static bool run_command_hidden(const std::string& cmd, std::string& output, int*
     return true;
 }
 
+static std::string resolve_python_full_path(const std::string& path) {
+    if (path.empty()) {
+        return "";
+    }
+    // 已是绝对/相对路径：直接使用
+    if (path.find('\\') != std::string::npos || path.find('/') != std::string::npos) {
+        return path;
+    }
+    // 裸命令名（python / py）：解析为完整路径，避免 CreateProcess 依赖 fb2k PATH
+    std::string full_path;
+    std::string where_cmd = std::string("where ") + path;
+    if (run_command_hidden(where_cmd, full_path)) {
+        size_t nl = full_path.find_first_of("\r\n");
+        if (nl != std::string::npos) {
+            full_path = full_path.substr(0, nl);
+        }
+        while (!full_path.empty() &&
+               (full_path.back() == ' ' || full_path.back() == '\t')) {
+            full_path.pop_back();
+        }
+        if (!full_path.empty()) {
+            return full_path;
+        }
+    }
+    return path;
+}
+
 static std::string get_python_path_internal() {
     if (!g_python_path.empty()) {
-        return g_python_path;
+        return resolve_python_full_path(g_python_path);
     }
     
     const char* python_paths[] = {
@@ -130,18 +157,7 @@ static std::string get_python_path_internal() {
                     return path;
                 }
                 
-                std::string full_path;
-                std::string where_cmd = std::string("where ") + path;
-                if (run_command_hidden(where_cmd, full_path)) {
-                    size_t len = full_path.length();
-                    while (len > 0 && (full_path[len-1] == '\n' || full_path[len-1] == '\r')) {
-                        full_path[--len] = '\0';
-                    }
-                    if (!full_path.empty()) {
-                        return full_path;
-                    }
-                }
-                return path;
+                return resolve_python_full_path(path);
             }
         }
     }
@@ -260,7 +276,7 @@ bool WorkerManager::start_worker_locked() {
     }
     
     std::string cmd = "\"" + python_exe + "\" -u \"" + worker_path_ + "\"";
-    Logger::instance().debug("start_worker: Command = " + cmd, __FILE__, __FUNCTION__);
+    Logger::instance().info("start_worker: Command = " + cmd, __FILE__, __FUNCTION__);
 
     // 构造子进程环境块：注入 FOO_METADATA_LOG_DIR，让 Python worker 把日志写到
     // 与 C++ 相同的目录（{components}/foo_metadata_enhancer/logs）
@@ -310,7 +326,8 @@ bool WorkerManager::start_worker_locked() {
         char error_msg[256];
         FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM, NULL, error, 0, error_msg, sizeof(error_msg), NULL);
         std::stringstream ss;
-        ss << "start_worker: CreateProcess failed, error = " << error << ": " << error_msg;
+        ss << "start_worker: CreateProcess failed, error = " << error << ": " << error_msg
+           << " python_exe=[" << python_exe << "] worker=[" << worker_path_ << "]";
         LOG_ERROR(ss.str());
         CloseHandle(hStdinWrite);
         CloseHandle(hStdoutRead);
